@@ -21,4 +21,14 @@ old project/
 # Logs
 *.log
 
-/db/
+/db/ui_settings.json
+/db/tasks_progress.json
+/db/tasks_finished.json
+/db/tasks_draft.json
+/db/tasks_delayed.json
+/db/subjects.json
+/db/statuses.json
+/db/roles.json
+/db/profile.json
+/db/people_settings.json
+/db/images/
