@@ -1,0 +1,28 @@
+{
+  "statuses": [
+    {
+      "id": "status_none",
+      "name": "Без статуса",
+      "color": "#9E9E9E",
+      "locked": true
+    },
+    {
+      "id": "status_available",
+      "name": "Доступен",
+      "color": "#4CAF50",
+      "locked": false
+    },
+    {
+      "id": "status_busy",
+      "name": "Занят",
+      "color": "#FF9800",
+      "locked": false
+    },
+    {
+      "id": "status_absent",
+      "name": "Отсутствует",
+      "color": "#EF5350",
+      "locked": false
+    }
+  ]
+}

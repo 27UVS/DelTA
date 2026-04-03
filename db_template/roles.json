@@ -1,0 +1,25 @@
+{
+  "roles": [
+    {
+      "id": "role_admin",
+      "name": "Администратор",
+      "color": "#000000",
+      "priority": 0,
+      "locked": true
+    },
+    {
+      "id": "role_none",
+      "name": "Без роли",
+      "color": "#BDBDBD",
+      "priority": 9999,
+      "locked": true
+    },
+    {
+      "id": "a28b9a80-b718-4f90-98ab-fcf82ee53bdb",
+      "name": "Руководитель",
+      "color": "#ee3157",
+      "priority": 1,
+      "locked": false
+    }
+  ]
+}

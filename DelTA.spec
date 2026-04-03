@@ -13,7 +13,7 @@ a = Analysis(
     binaries=[],
     datas=[
         ("assets", "assets"),
-        ("db", "db"),
+        ("db_template", "db"),
     ],
     hiddenimports=hiddenimports,
     hookspath=[],

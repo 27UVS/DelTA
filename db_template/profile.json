@@ -1,0 +1,16 @@
+{
+  "nickname": "Администратор",
+  "avatar_path": null,
+  "links": {
+    "youtube": "",
+    "instagram": "",
+    "tumblr": "",
+    "x": "",
+    "telegram": "",
+    "vk": "",
+    "other": ""
+  },
+  "role_ids": [
+    "role_admin"
+  ]
+}
