@@ -18,6 +18,7 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QColorDialog,
     QGroupBox,
+    QSpinBox,
 )
 
 from app.assets import get_interface_assets
@@ -94,6 +95,15 @@ class InterfaceSettingsPage(QWidget):
         form_grid.addWidget(lbl_img, 2, 0)
         form_grid.addWidget(img_wrap, 2, 1)
 
+        lbl_sub = QLabel("Подзадач в строке:")
+        lbl_sub.setFixedWidth(label_w)
+        lbl_sub.setToolTip("Максимум точек подзадач на одной линии в окне просмотра задачи (остальные переносятся на следующую).")
+        self.subtasks_per_row_spin = QSpinBox()
+        self.subtasks_per_row_spin.setRange(2, 24)
+        self.subtasks_per_row_spin.setValue(6)
+        form_grid.addWidget(lbl_sub, 3, 0)
+        form_grid.addWidget(self.subtasks_per_row_spin, 3, 1, alignment=Qt.AlignmentFlag.AlignLeft)
+
         root.addLayout(form_grid)
 
         box = QGroupBox("Превью")
@@ -136,6 +146,10 @@ class InterfaceSettingsPage(QWidget):
         self.theme_combo.setCurrentText(theme if theme in ("dark", "light") else "dark")
         self.bg_color_edit.setText(bg)
         self.bg_image_edit.setText(str(path))
+        try:
+            self.subtasks_per_row_spin.setValue(int(settings.get("subtasks_max_per_row", 6)))
+        except Exception:
+            self.subtasks_per_row_spin.setValue(6)
         self._refresh_preview()
 
     def _choose_color(self) -> None:
@@ -183,14 +197,16 @@ class InterfaceSettingsPage(QWidget):
             QMessageBox.critical(self, "Ошибка", "Файл фона не найден.")
             return
 
+        prev = self.storage.get_ui_settings()
         self.storage.save_ui_settings(
             {
                 "theme": theme,
                 "background_color": bg_color,
                 "background_image_path": bg_image_path,
                 # preserve board flags
-                "people_panel_open": bool(self.storage.get_ui_settings().get("people_panel_open", True)),
-                "people_panel_pinned": bool(self.storage.get_ui_settings().get("people_panel_pinned", False)),
+                "people_panel_open": bool(prev.get("people_panel_open", True)),
+                "people_panel_pinned": bool(prev.get("people_panel_pinned", False)),
+                "subtasks_max_per_row": int(self.subtasks_per_row_spin.value()),
             }
         )
         QMessageBox.information(self, "Готово", "Настройки применены.")

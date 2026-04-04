@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+import math
 from datetime import datetime
 
 from PySide6.QtCore import Qt, QDateTime
 from PySide6.QtCore import QSize
-from PySide6.QtGui import QIcon
+from PySide6.QtGui import QIcon, QGuiApplication
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QAbstractSpinBox,
@@ -12,11 +13,14 @@ from PySide6.QtWidgets import (
     QComboBox,
     QDateTimeEdit,
     QDialog,
+    QFrame,
     QGroupBox,
     QHBoxLayout,
     QLabel,
     QLineEdit,
     QPushButton,
+    QScrollArea,
+    QSizePolicy,
     QTextBrowser,
     QVBoxLayout,
     QWidget,
@@ -25,6 +29,46 @@ from PySide6.QtWidgets import (
 from app.assets import get_interface_assets
 from app.qt_icon_loader import QtIconLoader
 from app.storage import Storage, APP_TZ
+from app.task_subtasks import get_subtasks_from_task, get_subtasks_max_per_row_from_ui
+from app.qt_pages.task_subtasks_widgets import SubtaskChainDetailWidget, _detail_chain_content_height
+
+# Preview scroll: tall enough to show ~2 rows of the snake; max allows extra headroom.
+_SUBTASK_CHAIN_PREVIEW_MIN_H = _detail_chain_content_height(2) + 36
+_SUBTASK_CHAIN_PREVIEW_MAX_H = max(_SUBTASK_CHAIN_PREVIEW_MIN_H + 140, 420)
+
+
+# Read-only chrome: no dropdown / spin arrows (view mode is non-interactive).
+_VIEW_READ_ONLY_EXTRA_QSS = """
+QComboBox::drop-down {
+    width: 0px;
+    border: none;
+    padding: 0px;
+}
+QComboBox::down-arrow {
+    image: none;
+    width: 0px;
+    height: 0px;
+    border: none;
+}
+QDateTimeEdit::drop-down {
+    width: 0px;
+    border: none;
+    padding: 0px;
+}
+QDateTimeEdit::up-button, QDateTimeEdit::down-button {
+    width: 0px;
+    height: 0px;
+    border: none;
+    padding: 0px;
+    margin: 0px;
+}
+QDateTimeEdit::up-arrow, QDateTimeEdit::down-arrow {
+    image: none;
+    width: 0px;
+    height: 0px;
+    border: none;
+}
+"""
 
 
 def _dt_from_iso_local(iso: str | None) -> datetime | None:
@@ -91,6 +135,7 @@ class TaskViewDialog(QDialog):
         self.resp_combo.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
         self.resp_combo.view().setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
         self.resp_combo.setEnabled(False)
+        self.resp_combo.setStyleSheet(_VIEW_READ_ONLY_EXTRA_QSS)
         resp_l.addWidget(self.resp_combo)
         root.addWidget(box_resp)
 
@@ -103,26 +148,28 @@ class TaskViewDialog(QDialog):
         row_start = QHBoxLayout()
         row_start.addWidget(QLabel("Startline"), 0)
         self.start_dt = QDateTimeEdit()
-        self.start_dt.setCalendarPopup(True)
+        self.start_dt.setCalendarPopup(False)
         self.start_dt.setDisplayFormat("yyyy-MM-dd HH:mm")
         self.start_dt.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
         self.start_dt.setMinimumDateTime(min_dt)
         self.start_dt.setSpecialValueText("не выбрано")
         self.start_dt.setDateTime(min_dt)
         self.start_dt.setEnabled(False)
+        self.start_dt.setStyleSheet(_VIEW_READ_ONLY_EXTRA_QSS)
         row_start.addWidget(self.start_dt, 1)
         dates_l.addLayout(row_start)
 
         row_dead = QHBoxLayout()
         row_dead.addWidget(QLabel("Deadline"), 0)
         self.dead_dt = QDateTimeEdit()
-        self.dead_dt.setCalendarPopup(True)
+        self.dead_dt.setCalendarPopup(False)
         self.dead_dt.setDisplayFormat("yyyy-MM-dd HH:mm")
         self.dead_dt.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
         self.dead_dt.setMinimumDateTime(min_dt)
         self.dead_dt.setSpecialValueText("не выбрано")
         self.dead_dt.setDateTime(min_dt)
         self.dead_dt.setEnabled(False)
+        self.dead_dt.setStyleSheet(_VIEW_READ_ONLY_EXTRA_QSS)
         row_dead.addWidget(self.dead_dt, 1)
         dates_l.addLayout(row_dead)
 
@@ -138,6 +185,54 @@ class TaskViewDialog(QDialog):
 
         root.addWidget(box_dates)
 
+        if get_subtasks_from_task(self._task):
+            profile = self.storage.get_profile()
+            name_by_id = {"__admin__": str(profile.get("nickname", "Администратор"))}
+            for s in self.storage.get_subjects():
+                sid = str(s.get("id") or "")
+                if sid:
+                    name_by_id[sid] = str(s.get("nickname") or "")
+            max_row = get_subtasks_max_per_row_from_ui(self.storage.get_ui_settings())
+            self._subtasks_name_by_id = name_by_id
+            self._subtasks_max_row = max_row
+
+            self._subtasks_detail = SubtaskChainDetailWidget(
+                task=self._task, name_by_id=name_by_id, max_per_row=max_row, parent=self
+            )
+
+            box_st = QGroupBox("Цепочка подзадач")
+            st_l = QVBoxLayout(box_st)
+            st_l.setContentsMargins(12, 10, 12, 12)
+
+            bar = QHBoxLayout()
+            bar.addStretch(1)
+            expand_btn = QPushButton("Развернуть")
+            expand_btn.setToolTip("Открыть цепочку целиком в отдельном окне")
+            expand_btn.clicked.connect(self._open_subtasks_chain_expanded)
+            bar.addWidget(expand_btn)
+            st_l.addLayout(bar)
+
+            self._subtasks_scroll = QScrollArea()
+            self._subtasks_scroll.setWidgetResizable(True)
+            self._subtasks_scroll.setFrameShape(QFrame.Shape.NoFrame)
+            self._subtasks_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+            n_sub = len(get_subtasks_from_task(self._task))
+            mpr = max(2, min(24, int(max_row)))
+            snake_rows = max(1, math.ceil(n_sub / mpr))
+            content_h = _detail_chain_content_height(snake_rows) + 28
+            if snake_rows <= 1:
+                scroll_min = min(content_h, _SUBTASK_CHAIN_PREVIEW_MIN_H)
+            else:
+                scroll_min = _SUBTASK_CHAIN_PREVIEW_MIN_H
+            scroll_max = max(scroll_min + 120, _SUBTASK_CHAIN_PREVIEW_MAX_H)
+            self._subtasks_scroll.setMinimumHeight(scroll_min)
+            self._subtasks_scroll.setMaximumHeight(scroll_max)
+            self._subtasks_scroll.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Maximum)
+            self._subtasks_scroll.setWidget(self._subtasks_detail)
+            st_l.addWidget(self._subtasks_scroll)
+
+            root.addWidget(box_st)
+
         # Description
         box_desc = QGroupBox("Описание")
         desc_l = QVBoxLayout(box_desc)
@@ -149,6 +244,45 @@ class TaskViewDialog(QDialog):
         root.addWidget(box_desc, 1)
 
         self._populate()
+
+    def _open_subtasks_chain_expanded(self) -> None:
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Цепочка подзадач")
+        dlg.setModal(True)
+        screen = QGuiApplication.primaryScreen()
+        avail = screen.availableGeometry() if screen is not None else None
+        w = 860
+        h = 720
+        if avail is not None:
+            w = min(w, max(480, avail.width() - 80))
+            h = min(h, max(400, int(avail.height() * 0.88)))
+        dlg.resize(w, h)
+
+        lay = QVBoxLayout(dlg)
+        lay.setContentsMargins(12, 12, 12, 12)
+        lay.setSpacing(10)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        chain = SubtaskChainDetailWidget(
+            task=self._task,
+            name_by_id=self._subtasks_name_by_id,
+            max_per_row=self._subtasks_max_row,
+            parent=dlg,
+        )
+        scroll.setWidget(chain)
+        lay.addWidget(scroll, 1)
+
+        row = QHBoxLayout()
+        row.addStretch(1)
+        close_btn = QPushButton("Закрыть")
+        close_btn.clicked.connect(dlg.accept)
+        row.addWidget(close_btn)
+        lay.addLayout(row)
+
+        dlg.exec()
 
     def _populate(self) -> None:
         t = self._task or {}
@@ -184,12 +318,14 @@ class TaskViewDialog(QDialog):
             self.desc_edit.setPlainText(s)
 
     def _on_edit_clicked(self) -> None:
-        # Replace view with edit dialog. No return to view after save/cancel.
+        # Hide view immediately, then run edit as the only visible modal; finish with accept so board refreshes.
         try:
             from app.qt_pages.task_create_dialog import TaskCreateDialog
         except Exception:
             return
-        dlg = TaskCreateDialog(parent=self.parent() if isinstance(self.parent(), QWidget) else self, storage=self.storage, column_kind=self.column_kind, task=self._task)
+        parent = self.parent() if isinstance(self.parent(), QWidget) else self
+        self.hide()
+        dlg = TaskCreateDialog(parent=parent, storage=self.storage, column_kind=self.column_kind, task=self._task)
         dlg.exec()
         self.accept()
 

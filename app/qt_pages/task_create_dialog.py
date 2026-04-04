@@ -3,10 +3,11 @@ from __future__ import annotations
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from functools import partial
 from pathlib import Path
 from html import escape as _html_escape
 
-from PySide6.QtCore import Qt, QDateTime, QDate
+from PySide6.QtCore import Qt, QDateTime, QDate, QTime
 from PySide6.QtCore import QSize
 from PySide6.QtGui import (
     QPixmap,
@@ -39,11 +40,19 @@ from PySide6.QtWidgets import (
     QTextEdit,
     QVBoxLayout,
     QWidget,
+    QScrollArea,
+    QFrame,
 )
 
 from app.storage import Storage, utc_now_iso, SYSTEM_STATUS_NONE_ID, APP_TZ
 from app.assets import get_interface_assets
 from app.qt_icon_loader import QtIconLoader
+from app.task_subtasks import (
+    get_subtasks_from_task,
+    normalize_subtask_row,
+    subtasks_sequential_dones_flags,
+    validate_subtasks_sequential_order,
+)
 
 _ADMIN_PERSON_ID = "__admin__"
 
@@ -64,6 +73,17 @@ def _dt_to_iso(dt: datetime) -> str:
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=APP_TZ)
     return dt.astimezone(APP_TZ).isoformat(timespec="seconds")
+
+
+def _datetime_to_qdt(dt: datetime) -> QDateTime:
+    """Wall clock in APP_TZ for QDateTimeEdit."""
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=APP_TZ)
+    dt = dt.astimezone(APP_TZ)
+    from_py = getattr(QDateTime, "fromPython", None)
+    if callable(from_py):
+        return from_py(dt)
+    return QDateTime(QDate(dt.year, dt.month, dt.day), QTime(dt.hour, dt.minute, dt.second))
 
 
 def _circular_avatar(pix: QPixmap, size: int) -> QPixmap:
@@ -117,7 +137,7 @@ class TaskCreateDialog(QDialog):
 
         self.setWindowTitle("Создать задание" if self._task is None else "Редактировать задание")
         self.setModal(True)
-        self.resize(760, 680)
+        self.resize(760, 740)
 
         root = QVBoxLayout(self)
         root.setContentsMargins(14, 14, 14, 14)
@@ -145,6 +165,8 @@ class TaskCreateDialog(QDialog):
         dates_l = QVBoxLayout(box_dates)
 
         min_dt = QDateTime.fromString("2000-01-01T00:00:00", Qt.DateFormat.ISODate)
+        self._dates_min_dt = min_dt
+        self._dates_max_dt = QDateTime(QDate(7999, 12, 31), QTime(23, 59, 59))
         today = QDate.currentDate()
 
         row_start = QHBoxLayout()
@@ -159,7 +181,6 @@ class TaskCreateDialog(QDialog):
         self.start_dt.setDateTime(min_dt)
         try:
             self.start_dt.calendarWidget().setCurrentPage(today.year(), today.month())
-            self.start_dt.calendarWidget().setSelectedDate(today)
         except Exception:
             pass
         row_start.addWidget(self.start_dt, 1)
@@ -177,11 +198,13 @@ class TaskCreateDialog(QDialog):
         self.dead_dt.setDateTime(min_dt)
         try:
             self.dead_dt.calendarWidget().setCurrentPage(today.year(), today.month())
-            self.dead_dt.calendarWidget().setSelectedDate(today)
         except Exception:
             pass
         row_dead.addWidget(self.dead_dt, 1)
         dates_l.addLayout(row_dead)
+
+        self.start_dt.dateTimeChanged.connect(self._sync_start_deadline_relation)
+        self.dead_dt.dateTimeChanged.connect(self._sync_start_deadline_relation)
 
         row_flags = QHBoxLayout()
         self.no_deadline_cb = QCheckBox("Задание без deadline")
@@ -194,6 +217,29 @@ class TaskCreateDialog(QDialog):
         dates_l.addLayout(row_flags)
 
         root.addWidget(box_dates)
+
+        # Subtasks (optional chain)
+        box_sub = QGroupBox("Подзадачи")
+        sub_outer = QVBoxLayout(box_sub)
+        sub_outer.setSpacing(10)
+        self._subtask_rows: list[dict] = []
+        self._subtasks_inner = QWidget()
+        self._subtasks_layout = QVBoxLayout(self._subtasks_inner)
+        self._subtasks_layout.setContentsMargins(0, 0, 0, 0)
+        self._subtasks_layout.setSpacing(8)
+        sub_scroll = QScrollArea()
+        sub_scroll.setWidgetResizable(True)
+        sub_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        sub_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        sub_scroll.setWidget(self._subtasks_inner)
+        # Taller editor so several rows + scrollbar do not fight with the add button.
+        sub_scroll.setMinimumHeight(300)
+        sub_scroll.setMaximumHeight(480)
+        sub_outer.addWidget(sub_scroll, 1)
+        self.add_sub_btn = QPushButton("Добавить подзадачу")
+        self.add_sub_btn.clicked.connect(self._on_add_subtask_row)
+        sub_outer.addWidget(self.add_sub_btn)
+        root.addWidget(box_sub)
 
         # Description
         box_desc = QGroupBox("Описание")
@@ -263,6 +309,61 @@ class TaskCreateDialog(QDialog):
         self._update_resp_summary()
         if self._task is not None:
             self._load_task()
+        else:
+            self._apply_new_task_default_times()
+            self._sync_start_deadline_relation()
+
+    def _apply_new_task_default_times(self) -> None:
+        """New task: start = now, deadline = now + 24h (visible defaults, not 'не выбрано')."""
+        now = _now_local()
+        qs = _datetime_to_qdt(now)
+        qe = _datetime_to_qdt(now + timedelta(days=1))
+        # Set both under blocked signals: if only start is set first, _sync would use deadline still at
+        # calendar "today 00:00" and clamp start's time down to midnight via setMaximumDateTime.
+        self.start_dt.blockSignals(True)
+        self.dead_dt.blockSignals(True)
+        self.dead_dt.setDateTime(qe)
+        self.start_dt.setDateTime(qs)
+        self.start_dt.blockSignals(False)
+        self.dead_dt.blockSignals(False)
+        try:
+            self.start_dt.calendarWidget().setCurrentPage(qs.date().year(), qs.date().month())
+            self.dead_dt.calendarWidget().setCurrentPage(qe.date().year(), qe.date().month())
+        except Exception:
+            pass
+
+    def _sync_start_deadline_relation(self) -> None:
+        """Keep startline <= deadline when both apply; relax limits for recurring / no deadline."""
+        if self.recurring_cb.isChecked() or self.no_deadline_cb.isChecked():
+            self.start_dt.blockSignals(True)
+            self.dead_dt.blockSignals(True)
+            self.start_dt.setMaximumDateTime(self._dates_max_dt)
+            self.dead_dt.setMinimumDateTime(self._dates_min_dt)
+            self.start_dt.blockSignals(False)
+            self.dead_dt.blockSignals(False)
+            return
+
+        d = self.dead_dt.dateTime()
+        s = self.start_dt.dateTime()
+        dead_chosen = d > self.dead_dt.minimumDateTime()
+        start_chosen = s > self.start_dt.minimumDateTime()
+
+        self.start_dt.blockSignals(True)
+        self.dead_dt.blockSignals(True)
+        if dead_chosen:
+            self.start_dt.setMaximumDateTime(d)
+        else:
+            self.start_dt.setMaximumDateTime(self._dates_max_dt)
+        if start_chosen:
+            self.dead_dt.setMinimumDateTime(s if s >= self._dates_min_dt else self._dates_min_dt)
+        else:
+            self.dead_dt.setMinimumDateTime(self._dates_min_dt)
+        if dead_chosen and start_chosen and s > d:
+            self.start_dt.setDateTime(d)
+        if dead_chosen and start_chosen and d < s:
+            self.dead_dt.setDateTime(self.start_dt.dateTime())
+        self.start_dt.blockSignals(False)
+        self.dead_dt.blockSignals(False)
 
     def _load_task(self) -> None:
         t = self._task or {}
@@ -280,10 +381,9 @@ class TaskCreateDialog(QDialog):
             it.setCheckState(Qt.CheckState.Checked if pid in selected else Qt.CheckState.Unchecked)
         self._update_resp_summary()
 
-        # flags and dates
+        # flags and dates (apply datetimes before _on_flags_changed/_sync so limits are not clamped to placeholders)
         self.no_deadline_cb.setChecked(bool(t.get("no_deadline", False)))
         self.recurring_cb.setChecked(bool(t.get("recurring", False)))
-        self._on_flags_changed()
 
         def _set_dt(edit: QDateTimeEdit, iso: str | None) -> None:
             if not iso:
@@ -300,6 +400,126 @@ class TaskCreateDialog(QDialog):
 
         _set_dt(self.start_dt, t.get("start_due"))
         _set_dt(self.dead_dt, t.get("end_due"))
+        self._on_flags_changed()
+        self._load_subtasks()
+        self._sync_start_deadline_relation()
+
+    def _default_subtask_responsible(self) -> str:
+        ids = self._selected_responsibles()
+        if ids:
+            return str(ids[0])
+        if self._people:
+            return str(self._people[0].id)
+        return _ADMIN_PERSON_ID
+
+    def _clear_subtask_rows(self) -> None:
+        for row in list(self._subtask_rows):
+            w = row["w"]
+            self._subtasks_layout.removeWidget(w)
+            w.deleteLater()
+        self._subtask_rows.clear()
+
+    def _load_subtasks(self) -> None:
+        self._clear_subtask_rows()
+        if self._task is None:
+            return
+        raw = get_subtasks_from_task(self._task)
+        dones = subtasks_sequential_dones_flags(raw)
+        for st, done in zip(raw, dones):
+            rid = str(st.get("responsible_subject_id") or "")
+            ids = st.get("responsible_subject_ids")
+            if isinstance(ids, list) and ids:
+                rid = str(ids[0])
+            self._append_subtask_row(str(st.get("title") or ""), rid, done, str(st.get("id") or ""))
+
+    def _on_add_subtask_row(self) -> None:
+        self._append_subtask_row("", self._default_subtask_responsible(), False, "")
+
+    def _append_subtask_row(self, title: str, responsible_id: str, done: bool, existing_id: str) -> None:
+        row_w = QWidget()
+        hl = QHBoxLayout(row_w)
+        hl.setContentsMargins(0, 0, 0, 0)
+        te = QLineEdit()
+        te.setPlaceholderText("Название подзадачи")
+        te.setText(title)
+        cb = QComboBox()
+        for p in self._people:
+            cb.addItem(p.name, p.id)
+        idx = 0
+        rid = str(responsible_id or "")
+        for i in range(cb.count()):
+            if str(cb.itemData(i)) == rid:
+                idx = i
+                break
+        cb.setCurrentIndex(idx)
+        done_cb = QCheckBox("Готово")
+        done_cb.setChecked(done)
+        done_cb.stateChanged.connect(partial(self._on_subtask_done_state_changed, row_w))
+        rm = QPushButton("✕")
+        rm.setFixedWidth(28)
+        rm.setToolTip("Удалить подзадачу")
+        rm.clicked.connect(partial(self._remove_subtask_row, row_w))
+        hl.addWidget(te, 2)
+        hl.addWidget(cb, 1)
+        hl.addWidget(done_cb, 0)
+        hl.addWidget(rm, 0)
+        self._subtasks_layout.addWidget(row_w)
+        self._subtask_rows.append({"w": row_w, "title": te, "person": cb, "done": done_cb, "sid": (existing_id or None)})
+
+    def _remove_subtask_row(self, w: QWidget) -> None:
+        for i, row in enumerate(self._subtask_rows):
+            if row["w"] is w:
+                self._subtasks_layout.removeWidget(w)
+                w.deleteLater()
+                self._subtask_rows.pop(i)
+                return
+
+    def _on_subtask_done_state_changed(self, row_w: QWidget, state: int) -> None:
+        idx = next((i for i, r in enumerate(self._subtask_rows) if r["w"] is row_w), None)
+        if idx is None:
+            return
+        cb = self._subtask_rows[idx]["done"]
+        if Qt.CheckState(state) == Qt.CheckState.Checked:
+            for i in range(idx):
+                if not self._subtask_rows[i]["done"].isChecked():
+                    cb.blockSignals(True)
+                    cb.setChecked(False)
+                    cb.blockSignals(False)
+                    QMessageBox.warning(
+                        self,
+                        "Порядок подзадач",
+                        "Сначала отметьте выполненными все предыдущие пункты цепочки.",
+                    )
+                    return
+        else:
+            for j in range(idx + 1, len(self._subtask_rows)):
+                o = self._subtask_rows[j]["done"]
+                if not o.isChecked():
+                    continue
+                o.blockSignals(True)
+                o.setChecked(False)
+                o.blockSignals(False)
+
+    def _collect_subtasks_payload(self) -> list[dict]:
+        out: list[dict] = []
+        for row in self._subtask_rows:
+            title = row["title"].text().strip()
+            if not title:
+                continue
+            pid = str(row["person"].currentData() or "")
+            if not pid:
+                raise ValueError("Для каждой подзадачи нужен ответственный.")
+            sid = row.get("sid")
+            out.append(
+                normalize_subtask_row(
+                    title=title,
+                    responsible_id=pid,
+                    done=bool(row["done"].isChecked()),
+                    existing_id=str(sid) if sid else None,
+                )
+            )
+        validate_subtasks_sequential_order(out)
+        return out
 
     def _load_people(self) -> None:
         # Admin + subjects (the same set as people panel)
@@ -385,6 +605,7 @@ class TaskCreateDialog(QDialog):
         recur = self.recurring_cb.isChecked()
         self.dead_dt.setEnabled((not no_dead) and (not recur))
         self.start_dt.setEnabled(not recur)
+        self._sync_start_deadline_relation()
 
     def _date_or_none(self, edit: QDateTimeEdit) -> datetime | None:
         # If at minimum => treat as "not chosen"
@@ -416,8 +637,21 @@ class TaskCreateDialog(QDialog):
         if not recur and not no_dead:
             deadline = self._date_or_none(self.dead_dt) or (now + timedelta(days=1))
 
+        if not recur and not no_dead and start is not None and deadline is not None and start > deadline:
+            QMessageBox.critical(
+                self,
+                "Ошибка",
+                "Startline не может быть позже deadline. Укажите дату начала не позже срока окончания.",
+            )
+            return
+
         task_id = self._task_id or str(uuid.uuid4())
         created_at = str((self._task or {}).get("created_at") or utc_now_iso())
+        try:
+            subtasks = self._collect_subtasks_payload()
+        except ValueError as e:
+            QMessageBox.critical(self, "Ошибка", str(e))
+            return
         payload: dict = {
             "id": task_id,
             "title": title,
@@ -431,6 +665,7 @@ class TaskCreateDialog(QDialog):
             "no_deadline": bool(no_dead),
             "recurring": bool(recur),
             "status_id": SYSTEM_STATUS_NONE_ID,
+            "subtasks": subtasks,
         }
 
         try:

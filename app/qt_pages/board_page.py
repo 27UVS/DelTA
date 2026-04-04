@@ -47,6 +47,8 @@ from app.theme import Palette, get_palette
 from app.qt_pages.person_settings_dialog import PersonSettingsDialog
 from app.qt_pages.task_create_dialog import TaskCreateDialog
 from app.qt_pages.task_view_dialog import TaskViewDialog
+from app.qt_pages.task_subtasks_widgets import SubtaskChainCompactWidget
+from app.task_subtasks import get_subtasks_from_task
 
 try:
     import shiboken6  # type: ignore
@@ -1422,6 +1424,21 @@ class BoardPage(QWidget):
             row.addStretch(1)
 
         l.addLayout(row)
+
+        # Subtask progress: between assignees and time.
+        # Do NOT gate on QWidget.isVisible() here — while the card is being built its
+        # ancestors are not shown yet, so isVisible() is false and the strip would stay
+        # a non-layout child of the card at (0,0), drawn on top of the title.
+        if get_subtasks_from_task(task):
+            strip_holder = QWidget(card)
+            strip_holder.setObjectName("TaskCardSubtaskStripHolder")
+            sh_l = QVBoxLayout(strip_holder)
+            sh_l.setContentsMargins(0, 4, 0, 8)
+            sh_l.setSpacing(0)
+            sub_strip = SubtaskChainCompactWidget(strip_holder)
+            sub_strip.set_task(task)
+            sh_l.addWidget(sub_strip)
+            l.addWidget(strip_holder)
 
         # Time label (wekan-like)
         recurring = bool(task.get("recurring", False)) or (not task.get("start_due") and not task.get("end_due"))
