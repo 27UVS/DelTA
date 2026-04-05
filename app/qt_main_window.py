@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import sys
 
-from PySide6.QtGui import QIcon
+from PySide6.QtGui import QCloseEvent, QIcon
 from PySide6.QtWidgets import QApplication, QMainWindow, QStackedWidget
 from PySide6.QtCore import QTimer
 
@@ -110,6 +110,10 @@ class MainWindow(QMainWindow):
         # Switch first; refresh runs after a short yield so the stack can paint.
         self.show_page("board")
         QTimer.singleShot(10, lambda: self.board.refresh_from_storage(force=False))
+
+    def closeEvent(self, event: QCloseEvent) -> None:  # type: ignore[override]
+        self.board.cleanup_threads()
+        super().closeEvent(event)
 
 
 def run_app() -> None:

@@ -75,7 +75,12 @@ class BoardPrefetchThread(QThread):
 
     def run(self) -> None:
         try:
+            if self.isInterruptionRequested():
+                return
             data = load_board_files(self._paths)
+            if self.isInterruptionRequested():
+                return
             self.loaded.emit(data)
         except Exception as e:
-            self.failed.emit(str(e))
+            if not self.isInterruptionRequested():
+                self.failed.emit(str(e))

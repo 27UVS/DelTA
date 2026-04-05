@@ -244,9 +244,13 @@ class BackgroundImageLoader(QThread):
 
     def run(self) -> None:
         try:
+            if self.isInterruptionRequested():
+                return
             reader = QImageReader(self._path)
             reader.setAutoTransform(True)
             img = reader.read()
+            if self.isInterruptionRequested():
+                return
             if img.isNull():
                 self.loaded.emit(None, self._key)
                 return
@@ -259,6 +263,8 @@ class BackgroundImageLoader(QThread):
                     Qt.AspectRatioMode.KeepAspectRatioByExpanding,
                     Qt.TransformationMode.SmoothTransformation,
                 )
+                if self.isInterruptionRequested():
+                    return
                 # Center-crop to exact target size.
                 if img.width() > 0 and img.height() > 0:
                     x = max(int((img.width() - self._target_size.width()) / 2), 0)
@@ -266,9 +272,11 @@ class BackgroundImageLoader(QThread):
                     w = min(self._target_size.width(), img.width())
                     h = min(self._target_size.height(), img.height())
                     img = img.copy(x, y, w, h)
-            self.loaded.emit(img, self._key)
+            if not self.isInterruptionRequested():
+                self.loaded.emit(img, self._key)
         except Exception:
-            self.loaded.emit(None, self._key)
+            if not self.isInterruptionRequested():
+                self.loaded.emit(None, self._key)
 
 
 class BackgroundFrame(QFrame):
@@ -381,6 +389,11 @@ class BoardPage(QWidget):
         self._bg_loader: BackgroundImageLoader | None = None
         self._bg_image: QImage | None = None
         self._bg_load_key: tuple[str, str | None, int, int] | None = None
+        self._bg_restart_apply_after_load: bool = False
+        self._bg_resize_timer = QTimer(self)
+        self._bg_resize_timer.setSingleShot(True)
+        self._bg_resize_timer.setInterval(80)
+        self._bg_resize_timer.timeout.connect(self._apply_background)
         self._column_bodies: list[_ColumnBody] = []
         self._person_avatar_by_id: dict[str, str | None] = {}
         self._person_name_by_id: dict[str, str] = {}
@@ -1385,16 +1398,51 @@ class BoardPage(QWidget):
             ts = QSize(1280, 720)
         # HiDPI: render to physical pixels to keep background crisp.
         dpr = float(self.board_area.devicePixelRatioF() or 1.0)
-        ts_phys = QSize(max(1, int(ts.width() * dpr)), max(1, int(ts.height() * dpr)))
+        tw = max(1, int(ts.width() * dpr))
+        th = max(1, int(ts.height() * dpr))
+        # Quantize so tiny per-pixel size changes during resize do not each spawn a new loader.
+        _qstep = 32
+        tw = max(_qstep, (tw // _qstep) * _qstep)
+        th = max(_qstep, (th // _qstep) * _qstep)
+        ts_phys = QSize(tw, th)
         load_key = (str(bg), str(path) if path else None, int(ts_phys.width()), int(ts_phys.height()))
 
-        # If settings + target size are unchanged, do nothing.
         if self._bg_load_key == load_key:
             return
         self._bg_key = key
-        self._bg_load_key = load_key
 
-        # Stop previous loader if any (best-effort; avoid leaking threads).
+        if not path or not Path(path).is_file():
+            if self._bg_loader is not None and self._bg_loader.isRunning():
+                try:
+                    self._bg_loader.loaded.disconnect()
+                except Exception:
+                    pass
+                self._bg_loader.requestInterruption()
+                self._bg_restart_apply_after_load = True
+                return
+            if self._bg_loader is not None:
+                old = self._bg_loader
+                self._bg_loader = None
+                try:
+                    old.loaded.disconnect()
+                except Exception:
+                    pass
+                old.deleteLater()
+            self._bg_load_key = load_key
+            self._bg_image = None
+            for b in self._column_bodies:
+                b.update()
+            return
+
+        if self._bg_loader is not None and self._bg_loader.isRunning():
+            try:
+                self._bg_loader.loaded.disconnect()
+            except Exception:
+                pass
+            self._bg_loader.requestInterruption()
+            self._bg_restart_apply_after_load = True
+            return
+
         if self._bg_loader is not None:
             old = self._bg_loader
             self._bg_loader = None
@@ -1402,21 +1450,12 @@ class BoardPage(QWidget):
                 old.loaded.disconnect()
             except Exception:
                 pass
-            try:
-                # If Qt already deleted the underlying C++ object, any call will raise RuntimeError.
-                if shiboken6 is None or bool(getattr(shiboken6, "isValid")(old)):
-                    old.requestInterruption()
-            except RuntimeError:
-                pass
+            old.deleteLater()
 
-        if not path or not Path(path).is_file():
-            self._bg_image = None
-            for b in self._column_bodies:
-                b.update()
-            return
-
+        self._bg_load_key = load_key
         loader = BackgroundImageLoader(path=str(path), target_size=ts_phys, key=key)
         self._bg_loader = loader
+        _lid = loader
 
         def _on_loaded(img, loaded_key) -> None:
             # Ignore stale loads (settings changed while loading).
@@ -1432,7 +1471,15 @@ class BoardPage(QWidget):
             for b in self._column_bodies:
                 b.update()
 
+        def _on_bg_thread_finished() -> None:
+            if self._bg_loader is _lid:
+                self._bg_loader = None
+            if self._bg_restart_apply_after_load:
+                self._bg_restart_apply_after_load = False
+                QTimer.singleShot(0, self._apply_background)
+
         loader.loaded.connect(_on_loaded)
+        loader.finished.connect(_on_bg_thread_finished)
         loader.finished.connect(loader.deleteLater)
         loader.start()
 
@@ -1705,8 +1752,26 @@ class BoardPage(QWidget):
         super().resizeEvent(event)
         self._layout_overlay()
         self._reposition_people_arrow()
-        # Debounce background resize re-render (if image enabled).
-        QTimer.singleShot(30, self._apply_background)
+        # One debounced apply (avoids stacking timers and piling up background loader threads).
+        self._bg_resize_timer.start()
+
+    def cleanup_threads(self) -> None:
+        """Wait for worker threads before shutdown (avoids 'QThread destroyed while still running')."""
+        self._bg_resize_timer.stop()
+        if self._bg_loader is not None:
+            try:
+                self._bg_loader.loaded.disconnect()
+            except Exception:
+                pass
+            if self._bg_loader.isRunning():
+                self._bg_loader.requestInterruption()
+                self._bg_loader.wait(5000)
+            self._bg_loader = None
+        if self._prefetch_thread is not None:
+            if self._prefetch_thread.isRunning():
+                self._prefetch_thread.requestInterruption()
+                self._prefetch_thread.wait(5000)
+            self._prefetch_thread = None
 
     def _layout_overlay(self) -> None:
         # Manual geometry: people panel overlays the board (unless pinned).
