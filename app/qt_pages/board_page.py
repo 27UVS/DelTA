@@ -393,6 +393,9 @@ class BoardPage(QWidget):
         self._people_palette: Palette | None = None
         self._people_filter_role_ids: set[str] = set()
         self._people_filter_status_ids: set[str] = set()
+        # People panel: task count — None | "zero" | "nonzero"; sort — None | "desc" | "asc"
+        self._people_filter_task_count: str | None = None
+        self._people_sort_tasks: str | None = None
         self._task_filter_resp_ids_by_kind: dict[str, set[str]] = {k: set() for k in TASK_KINDS}
         self._task_filter_time_mode_by_kind: dict[str, str | None] = {k: None for k in TASK_KINDS}
         self._prefetch_thread: BoardPrefetchThread | None = None
@@ -871,9 +874,19 @@ class BoardPage(QWidget):
                         status_name,
                         status_color,
                         status_id,
-                        int(tasks_cnt),
-                    )
+                    int(tasks_cnt),
                 )
+            )
+
+        if self._people_filter_task_count == "zero":
+            rows = [r for r in rows if r[-1] == 0]
+        elif self._people_filter_task_count == "nonzero":
+            rows = [r for r in rows if r[-1] > 0]
+
+        if self._people_sort_tasks == "desc":
+            rows.sort(key=lambda r: (-r[-1], r[1].lower()))
+        elif self._people_sort_tasks == "asc":
+            rows.sort(key=lambda r: (r[-1], r[1].lower()))
 
         self._people_rows = deque(rows)
         self._people_palette = p
@@ -924,6 +937,58 @@ class BoardPage(QWidget):
             a.toggled.connect(lambda checked, sid=str(st.id): self._toggle_people_status_filter(sid, checked))
             st_menu.addAction(a)
 
+        menu.addSeparator()
+        tasks_menu = menu.addMenu("Задачи")
+        # QActionGroup must not be parented on the submenu QMenu — on Windows the nested
+        # menu can fail to open. Parent on the root menu; actions stay on tasks_menu.
+        sort_group = QActionGroup(menu)
+        sort_group.setExclusive(True)
+        a_sort_roles = QAction("Стандартный порядок", tasks_menu)
+        a_sort_roles.setCheckable(True)
+        sort_group.addAction(a_sort_roles)
+        a_sort_roles.setChecked(self._people_sort_tasks is None)
+        a_sort_roles.toggled.connect(partial(self._on_people_sort_tasks_toggled, None))
+        tasks_menu.addAction(a_sort_roles)
+
+        a_sort_most = QAction("С большим числом", tasks_menu)
+        a_sort_most.setCheckable(True)
+        sort_group.addAction(a_sort_most)
+        a_sort_most.setChecked(self._people_sort_tasks == "desc")
+        a_sort_most.toggled.connect(partial(self._on_people_sort_tasks_toggled, "desc"))
+        tasks_menu.addAction(a_sort_most)
+
+        a_sort_least = QAction("С наименьшим числом", tasks_menu)
+        a_sort_least.setCheckable(True)
+        sort_group.addAction(a_sort_least)
+        a_sort_least.setChecked(self._people_sort_tasks == "asc")
+        a_sort_least.toggled.connect(partial(self._on_people_sort_tasks_toggled, "asc"))
+        tasks_menu.addAction(a_sort_least)
+
+        tasks_menu.addSeparator()
+
+        vis_group = QActionGroup(menu)
+        vis_group.setExclusive(True)
+        a_vis_all = QAction("Все", tasks_menu)
+        a_vis_all.setCheckable(True)
+        vis_group.addAction(a_vis_all)
+        a_vis_all.setChecked(self._people_filter_task_count is None)
+        a_vis_all.toggled.connect(partial(self._on_people_task_count_filter_toggled, None))
+        tasks_menu.addAction(a_vis_all)
+
+        a_vis_none = QAction("Нет задач", tasks_menu)
+        a_vis_none.setCheckable(True)
+        vis_group.addAction(a_vis_none)
+        a_vis_none.setChecked(self._people_filter_task_count == "zero")
+        a_vis_none.toggled.connect(partial(self._on_people_task_count_filter_toggled, "zero"))
+        tasks_menu.addAction(a_vis_none)
+
+        a_vis_some = QAction("Есть задачи", tasks_menu)
+        a_vis_some.setCheckable(True)
+        vis_group.addAction(a_vis_some)
+        a_vis_some.setChecked(self._people_filter_task_count == "nonzero")
+        a_vis_some.toggled.connect(partial(self._on_people_task_count_filter_toggled, "nonzero"))
+        tasks_menu.addAction(a_vis_some)
+
         menu.exec(self.filter_people_btn.mapToGlobal(QPoint(0, self.filter_people_btn.height())))
 
     def _toggle_people_role_filter(self, role_id: str, checked: bool) -> None:
@@ -945,6 +1010,24 @@ class BoardPage(QWidget):
     def _clear_people_filters(self) -> None:
         self._people_filter_role_ids.clear()
         self._people_filter_status_ids.clear()
+        self._people_filter_task_count = None
+        self._people_sort_tasks = None
+        self._refresh_people_after_filter_change()
+
+    def _on_people_sort_tasks_toggled(self, mode: str | None, checked: bool) -> None:
+        if not checked:
+            return
+        if self._people_sort_tasks == mode:
+            return
+        self._people_sort_tasks = mode
+        self._refresh_people_after_filter_change()
+
+    def _on_people_task_count_filter_toggled(self, mode: str | None, checked: bool) -> None:
+        if not checked:
+            return
+        if self._people_filter_task_count == mode:
+            return
+        self._people_filter_task_count = mode
         self._refresh_people_after_filter_change()
 
     def _refresh_people_after_filter_change(self) -> None:

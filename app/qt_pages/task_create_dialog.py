@@ -17,9 +17,11 @@ from PySide6.QtGui import (
     QStandardItemModel,
     QStandardItem,
     QPainterPath,
+    QPalette,
     QTextCharFormat,
     QTextCursor,
     QTextListFormat,
+    QTextFormat,
     QIcon,
 )
 from PySide6.QtWidgets import (
@@ -269,6 +271,8 @@ class TaskCreateDialog(QDialog):
             self._btn_link.setIcon(QIcon(pm))
             self._btn_link.setIconSize(QSize(18, 18))
         self._btn_link.setFixedSize(34, 28)
+        self._btn_unlink = _mk_btn("⌧", "Убрать ссылку с выделенного текста", self._fmt_unlink)
+        self._btn_unlink.setFixedSize(34, 28)
 
         for w in [
             self._btn_bold,
@@ -282,6 +286,7 @@ class TaskCreateDialog(QDialog):
             self._btn_bullets,
             self._btn_numbers,
             self._btn_link,
+            self._btn_unlink,
         ]:
             tools.addWidget(w, 0)
         tools.addStretch(1)
@@ -753,6 +758,25 @@ class TaskCreateDialog(QDialog):
         text = sel_text.strip() or url
         # Insert HTML anchor (works well for QTextEdit HTML storage)
         cur.insertHtml(f'<a href="{_html_escape(url)}">{_html_escape(text)}</a>')
+
+    def _fmt_unlink(self) -> None:
+        cur = self.desc_edit.textCursor()
+        fmt = QTextCharFormat()
+        fmt.setAnchor(False)
+        fmt.clearProperty(QTextFormat.Property.AnchorHref)
+        fmt.clearProperty(QTextFormat.Property.AnchorName)
+        if cur.hasSelection():
+            # HTML <a> often leaves underline + link color; mergeCharFormat ignores clearForeground().
+            fmt.setUnderlineStyle(QTextCharFormat.UnderlineStyle.NoUnderline)
+            text_clr = self.desc_edit.palette().color(QPalette.ColorRole.Text)
+            fmt.setForeground(QBrush(text_clr))
+        if not cur.hasSelection():
+            self.desc_edit.mergeCurrentCharFormat(fmt)
+            return
+        cur.beginEditBlock()
+        cur.mergeCharFormat(fmt)
+        cur.endEditBlock()
+        self.desc_edit.setTextCursor(cur)
 
     def _on_delete(self) -> None:
         if self._task is None or not self._task_id:
