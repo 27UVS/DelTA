@@ -18,9 +18,16 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QScrollArea,
     QCheckBox,
+    QFrame,
+    QSizePolicy,
 )
 
 from app.storage import Storage, SYSTEM_ADMIN_ROLE_ID, SYSTEM_NONE_ROLE_ID
+
+
+def _line_edit_min_height(edit: QLineEdit) -> int:
+    m = edit.fontMetrics()
+    return max(32, m.height() + 14)
 
 
 class ProfilePage(QWidget):
@@ -39,11 +46,25 @@ class ProfilePage(QWidget):
         h.setObjectName("H1")
         root.addWidget(h)
 
+        # Scroll the form so a short window gets scrollbars instead of squashing rows.
+        profile_scroll = QScrollArea()
+        profile_scroll.setWidgetResizable(True)
+        profile_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        profile_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        profile_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        profile_inner = QWidget()
+        profile_inner.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        inner_l = QVBoxLayout(profile_inner)
+        inner_l.setContentsMargins(0, 0, 0, 0)
+        inner_l.setSpacing(12)
+
         form_row = QHBoxLayout()
         form_row.setSpacing(16)
+        form_row.setAlignment(Qt.AlignmentFlag.AlignTop)
 
         # Avatar col
         avatar_col = QVBoxLayout()
+        avatar_col.setAlignment(Qt.AlignmentFlag.AlignTop)
         self.avatar_label = QLabel()
         self.avatar_label.setFixedSize(140, 140)
         self.avatar_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -52,13 +73,13 @@ class ProfilePage(QWidget):
         self.choose_avatar_btn = QPushButton("Выбрать аватар")
         self.choose_avatar_btn.clicked.connect(self._on_choose_avatar)
         avatar_col.addWidget(self.choose_avatar_btn)
-        avatar_col.addStretch(1)
         form_row.addLayout(avatar_col, 0)
 
         # Fields
         fields = QVBoxLayout()
         fields.setContentsMargins(0, 0, 0, 0)
         fields.setSpacing(8)
+        fields.setAlignment(Qt.AlignmentFlag.AlignTop)
 
         form_grid = QGridLayout()
         form_grid.setContentsMargins(0, 0, 0, 0)
@@ -70,8 +91,11 @@ class ProfilePage(QWidget):
 
         nick_lbl = QLabel("Никнейм:")
         nick_lbl.setFixedWidth(label_w)
+        nick_lbl.setAlignment(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft)
         self.nickname_edit = QLineEdit()
-        self.nickname_edit.setMinimumWidth(320)
+        self.nickname_edit.setMinimumWidth(200)
+        self.nickname_edit.setMinimumHeight(_line_edit_min_height(self.nickname_edit))
+        self.nickname_edit.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         form_grid.addWidget(nick_lbl, 0, 0)
         form_grid.addWidget(self.nickname_edit, 0, 1)
 
@@ -87,7 +111,10 @@ class ProfilePage(QWidget):
         ]:
             lbl = QLabel(f"{label}:")
             lbl.setFixedWidth(label_w)
+            lbl.setAlignment(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft)
             e = QLineEdit()
+            e.setMinimumHeight(_line_edit_min_height(e))
+            e.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
             self.link_edits[key] = e
             form_grid.addWidget(lbl, row, 0)
             form_grid.addWidget(e, row, 1)
@@ -97,10 +124,12 @@ class ProfilePage(QWidget):
         fields.addWidget(QLabel("Другие ссылки/контакты:"))
         self.other_text = QTextEdit()
         self.other_text.setFixedHeight(70)
+        self.other_text.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         fields.addWidget(self.other_text)
-        fields.addStretch(1)
         form_row.addLayout(fields, 1)
-        root.addLayout(form_row)
+        inner_l.addLayout(form_row)
+        profile_scroll.setWidget(profile_inner)
+        root.addWidget(profile_scroll, 1)
 
         roles_h = QLabel("Роли (кроме администратора):")
         roles_h.setObjectName("H2")

@@ -225,6 +225,11 @@ def build_stylesheet(p: Palette) -> str:
         border-color: {p.accent};
     }}
 
+    /* Single-line fields: keep a stable row height when the window/layout is tight */
+    QLineEdit {{
+        min-height: 32px;
+    }}
+
     /* Task card title (overrides generic QTextEdit above) */
     QFrame#Card QTextEdit#TaskCardTitle {{
         background: transparent;
