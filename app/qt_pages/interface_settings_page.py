@@ -4,7 +4,7 @@ from pathlib import Path
 
 from PySide6.QtCore import Qt
 from PySide6.QtCore import QSize
-from PySide6.QtGui import QPixmap, QShowEvent, QIcon
+from PySide6.QtGui import QFontMetrics, QPixmap, QShowEvent, QIcon
 from PySide6.QtWidgets import (
     QWidget,
     QVBoxLayout,
@@ -47,7 +47,9 @@ class InterfaceSettingsPage(QWidget):
         form_grid.setHorizontalSpacing(10)
         form_grid.setVerticalSpacing(10)
         form_grid.setColumnStretch(1, 1)
-        label_w = 110
+        _label_texts = ("Тема:", "Цвет фона:", "Фон-картинка:", "Подзадач в строке:")
+        fm = QFontMetrics(self.font())
+        label_w = max(fm.horizontalAdvance(t) for t in _label_texts) + 16
 
         lbl_theme = QLabel("Тема:")
         lbl_theme.setFixedWidth(label_w)
