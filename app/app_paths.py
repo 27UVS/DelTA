@@ -20,6 +20,9 @@ class AppPaths:
     tasks_delayed_path: Path
     ui_settings_path: Path
     people_settings_path: Path
+    stories_path: Path
+    story_statuses_path: Path
+    story_taxonomy_path: Path
 
     avatars_dir: Path
 
@@ -47,6 +50,9 @@ def get_app_paths() -> AppPaths:
         tasks_delayed_path=db_dir / "tasks_delayed.json",
         ui_settings_path=db_dir / "ui_settings.json",
         people_settings_path=db_dir / "people_settings.json",
+        stories_path=db_dir / "stories.json",
+        story_statuses_path=db_dir / "story_statuses.json",
+        story_taxonomy_path=db_dir / "story_taxonomy.json",
         avatars_dir=avatars_dir,
     )
 

@@ -2,3 +2,6 @@ icon-arrow-5176969.png - https://www.flaticon.com/ru/packs/arrows-479
 icon-arrow-5176734.png - https://www.flaticon.com/ru/packs/arrows-479
 icon_flow_chart_8883304_negate.png - https://www.flaticon.com/ru/packs/communication-712
 icon_flow_chart_8883506_negate.png - https://www.flaticon.com/ru/packs/communication-712
+free-icon-value-chain-4961561_negate.png - https://www.flaticon.com/ru/packs/miscellany-business-24
+free-icon-clipboard-10252104-negate.png - https://www.flaticon.com/ru/packs/travel-and-hotel-22
+free-icon-home-1946436-negate.png - https://www.flaticon.com/ru/packs/social-network-24

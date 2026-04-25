@@ -18,6 +18,9 @@ class InterfaceAssets:
     link_button_png: Path
     settings_active_png: Path
     settings_default_png: Path
+    add_subtask_png: Path
+    clipboard_png: Path
+    home_png: Path
 
     icon_png: Path
     icon_ico: Path
@@ -42,6 +45,9 @@ def get_interface_assets() -> InterfaceAssets:
         link_button_png=interface_dir / "link_button.png",
         settings_active_png=interface_dir / "settings_active_button.png",
         settings_default_png=interface_dir / "settings_default_button.png",
+        add_subtask_png=interface_dir / "free-icon-value-chain-4961561_negate.png",
+        clipboard_png=interface_dir / "free-icon-clipboard-10252104-negate.png",
+        home_png=interface_dir / "free-icon-home-1946436-negate.png",
         icon_png=interface_dir / "icon.png",
         icon_ico=interface_dir / "icon_small.ico",
     )

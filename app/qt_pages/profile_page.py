@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import os
+import sys
+import subprocess
 import shutil
 from pathlib import Path
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QPixmap, QShowEvent
 from PySide6.QtWidgets import (
     QWidget,
@@ -20,6 +23,7 @@ from PySide6.QtWidgets import (
     QCheckBox,
     QFrame,
     QSizePolicy,
+    QApplication,
 )
 
 from app.storage import Storage, SYSTEM_ADMIN_ROLE_ID, SYSTEM_NONE_ROLE_ID
@@ -126,6 +130,20 @@ class ProfilePage(QWidget):
         self.other_text.setFixedHeight(70)
         self.other_text.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         fields.addWidget(self.other_text)
+
+        # Experimental toggle (Stories planner etc.)
+        exp_row = QHBoxLayout()
+        exp_row.setContentsMargins(0, 0, 0, 0)
+        exp_row.setSpacing(10)
+        exp_lbl = QLabel("Экспериментальный режим")
+        exp_lbl.setAlignment(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft)
+        self.experimental_switch = _ToggleSwitch()
+        self.experimental_switch.setToolTip("Включает/выключает экспериментальные разделы (например, Истории).")
+        exp_row.addWidget(exp_lbl, 0, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        exp_row.addStretch(1)
+        exp_row.addWidget(self.experimental_switch, 0, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        # Align with the left edge of the "Другие ссылки/контакты" input itself.
+        fields.addLayout(exp_row)
         form_row.addLayout(fields, 1)
         inner_l.addLayout(form_row)
         profile_scroll.setWidget(profile_inner)
@@ -171,6 +189,7 @@ class ProfilePage(QWidget):
         for key, edit in self.link_edits.items():
             edit.setText(str(links.get(key, "")))
         self.other_text.setPlainText(str(links.get("other", "")))
+        self.experimental_switch.setChecked(bool(profile.get("experimental_mode", False)))
 
         # Avatar
         avatar_path = profile.get("avatar_path")
@@ -240,6 +259,7 @@ class ProfilePage(QWidget):
             return
 
         profile = self.storage.get_profile()
+        prev_exp = bool(profile.get("experimental_mode", False))
         profile["nickname"] = nickname
         links = profile.get("links", {}) or {}
         for key, edit in self.link_edits.items():
@@ -253,8 +273,95 @@ class ProfilePage(QWidget):
                 selected.add(role_id)
         profile["role_ids"] = list(selected)
 
+        new_exp = bool(self.experimental_switch.isChecked())
+        profile["experimental_mode"] = bool(new_exp)
+
         self.storage.save_profile(profile)
         QMessageBox.information(self, "Готово", "Профиль сохранен.")
+        if prev_exp != new_exp:
+            # Restart so the main navigation can be rebuilt cleanly.
+            QMessageBox.information(self, "Перезапуск", "Режим изменен. Приложение сейчас перезапустится.")
+            QTimer.singleShot(50, self._restart_app)
+
+    def _restart_app(self) -> None:
+        # Graceful shutdown: stop background QThreads before exec restart.
+        app = QApplication.instance()
+        try:
+            if app is not None:
+                for w in list(app.topLevelWidgets() or []):
+                    # MainWindow holds BoardPage which owns background threads.
+                    board = getattr(w, "board", None)
+                    if board is not None and hasattr(board, "cleanup_threads"):
+                        try:
+                            board.cleanup_threads()
+                        except Exception:
+                            pass
+        except Exception:
+            pass
+        try:
+            if app is not None:
+                app.closeAllWindows()
+                app.processEvents()
+        except Exception:
+            pass
+        # Start a new process first, then quit this one. This avoids Qt warnings on Windows
+        # like "QThreadStorage: entry destroyed before end of thread" that can appear with os.execl.
+        try:
+            subprocess.Popen([sys.executable, *sys.argv], cwd=os.getcwd())
+        except Exception:
+            # If we couldn't spawn, fall back to exec-replace.
+            try:
+                os.execl(sys.executable, sys.executable, *sys.argv)
+            except Exception:
+                pass
+        try:
+            if app is not None:
+                app.quit()
+        except Exception:
+            pass
+
+
+class _ToggleSwitch(QCheckBox):
+    """Simple toggle switch based on QCheckBox (no external deps)."""
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setText("")
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setFixedSize(46, 24)
+        # A lightweight "switch" look with a sliding knob.
+        self.setStyleSheet(
+            "QCheckBox{background: transparent; padding:0px; margin:0px;}"
+            "QCheckBox::indicator{width:46px; height:24px;}"
+            "QCheckBox::indicator:unchecked{"
+            "  border-radius:12px; background: rgba(255,255,255,0.16); border: 1px solid rgba(255,255,255,0.20);"
+            "}"
+            "QCheckBox::indicator:checked{"
+            "  border-radius:12px; background: rgba(90,160,255,0.55); border: 1px solid rgba(90,160,255,0.75);"
+            "}"
+        )
+
+    def paintEvent(self, event) -> None:  # type: ignore[override]
+        # Default paint draws only indicator; we also draw the knob on top.
+        super().paintEvent(event)
+        try:
+            from PySide6.QtGui import QPainter
+            from PySide6.QtCore import QRect
+
+            painter = QPainter(self)
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+            r = self.rect()
+            knob_d = 18
+            pad = 3
+            x = (r.width() - knob_d - pad) if self.isChecked() else pad
+            y = int((r.height() - knob_d) / 2)
+            knob = QRect(int(x), int(y), int(knob_d), int(knob_d))
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(Qt.GlobalColor.white)
+            painter.drawEllipse(knob)
+            painter.end()
+        except Exception:
+            return
 
 
 def _uuid4_hex() -> str:

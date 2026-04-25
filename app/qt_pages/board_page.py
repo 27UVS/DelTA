@@ -37,6 +37,7 @@ from PySide6.QtWidgets import (
     QFrame,
     QSizePolicy,
     QTextEdit,
+    QStackedWidget,
 )
 
 from app.assets import get_interface_assets
@@ -48,6 +49,7 @@ from app.qt_pages.person_settings_dialog import PersonSettingsDialog
 from app.qt_pages.task_create_dialog import TaskCreateDialog
 from app.qt_pages.task_view_dialog import TaskViewDialog
 from app.qt_pages.task_subtasks_widgets import SubtaskChainCompactWidget
+from app.qt_pages.stories_page import StoriesPage
 from app.task_subtasks import get_subtasks_from_task
 
 try:
@@ -411,9 +413,13 @@ class BoardPage(QWidget):
         self._people_sort_tasks: str | None = None
         self._task_filter_resp_ids_by_kind: dict[str, set[str]] = {k: set() for k in TASK_KINDS}
         self._task_filter_time_mode_by_kind: dict[str, str | None] = {k: None for k in TASK_KINDS}
+        # People panel counter mode: tasks (default) | stories (when Stories page is shown).
+        self._people_counter_mode: str = "tasks"
         self._prefetch_thread: BoardPrefetchThread | None = None
         self._prefetch_snapshot: dict | None = None
         self._last_seen_storage_rev: int = -1
+        self._columns_visible: bool = True
+        self._stories_enabled: bool = bool(self.storage.get_profile().get("experimental_mode", False))
 
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
@@ -485,6 +491,25 @@ class BoardPage(QWidget):
         title.setObjectName("H1")
         top.addWidget(title)
         top.addStretch(1)
+        if self._stories_enabled:
+            self.home_btn = QPushButton("")
+            self.home_btn.setToolTip("Показать доску задач")
+            hpm = self._icons.load_pixmap(self._assets.home_png, (22, 22))
+            if hpm is not None:
+                self.home_btn.setIcon(QIcon(hpm))
+            self.home_btn.setFixedSize(40, 34)
+            self.home_btn.clicked.connect(self._show_task_columns)
+            top.addWidget(self.home_btn)
+
+            self.clipboard_btn = QPushButton("")
+            self.clipboard_btn.setToolTip("Скрыть доску задач")
+            cpm = self._icons.load_pixmap(self._assets.clipboard_png, (22, 22))
+            if cpm is not None:
+                self.clipboard_btn.setIcon(QIcon(cpm))
+            self.clipboard_btn.setFixedSize(40, 34)
+            self.clipboard_btn.clicked.connect(self._hide_task_columns)
+            top.addWidget(self.clipboard_btn)
+
         self.admin_btn = QPushButton("")
         self.admin_btn.setToolTip("Администрирование")
         pix = self._icons.load_pixmap(self._assets.settings_default_png, (24, 24))
@@ -574,7 +599,18 @@ class BoardPage(QWidget):
             self._column_frames.append(col_card)
             self.columns_l.addWidget(col_card, 1)
 
-        content_l.addWidget(self.columns_inner, 1)
+        self.main_stack = QStackedWidget()
+        self.main_stack.addWidget(self.columns_inner)
+        self.stories_page = None
+        if self._stories_enabled:
+            self.stories_page = StoriesPage(storage=self.storage, parent=self.content_row)
+            try:
+                self.stories_page.stories_changed.connect(self._on_stories_changed)
+            except Exception:
+                pass
+            self.main_stack.addWidget(self.stories_page)
+        self.main_stack.setCurrentWidget(self.columns_inner)
+        content_l.addWidget(self.main_stack, 1)
         board_l.addWidget(self.content_row, 1)
 
         # Left-side arrow to open/close people panel.
@@ -594,6 +630,8 @@ class BoardPage(QWidget):
             "QPushButton:pressed{background: rgba(255,255,255,0.62);}"
         )
         self._set_people_arrow_icon(0)
+        if self._stories_enabled:
+            self._sync_columns_visibility_ui()
 
     # --- Public API (kept similar to tkinter version) ---
     def refresh_after_theme_change(self) -> None:
@@ -606,6 +644,13 @@ class BoardPage(QWidget):
         self._update_people_arrow()
         self._layout_overlay()
         self._apply_background()
+        self._sync_columns_visibility_ui()
+        # Roles/story taxonomy may have changed in admin; keep Stories page in sync.
+        if self._stories_enabled and self.stories_page is not None:
+            try:
+                self.stories_page.reload_from_storage()
+            except Exception:
+                pass
 
     def refresh_from_storage(self, *, force: bool = False) -> None:
         """Reload board: JSON is read off the UI thread; widgets are built in small batches."""
@@ -616,6 +661,7 @@ class BoardPage(QWidget):
             self._update_people_arrow()
             self._layout_overlay()
             self._apply_background()
+            self._sync_columns_visibility_ui()
             return
         self._refresh_gen += 1
         gen = self._refresh_gen
@@ -626,6 +672,13 @@ class BoardPage(QWidget):
         self._update_people_arrow()
         self._layout_overlay()
         self._apply_background()
+        self._sync_columns_visibility_ui()
+        # Keep Stories page in sync with changed roles/taxonomy/stories.
+        if self._stories_enabled and self.stories_page is not None:
+            try:
+                self.stories_page.reload_from_storage()
+            except Exception:
+                pass
 
         self._start_prefetch_thread(gen)
 
@@ -692,6 +745,7 @@ class BoardPage(QWidget):
                 color=str(r.get("color", "#BDBDBD")),
                 priority=int(r.get("priority", 9999)),
                 locked=bool(r.get("locked", False)),
+                for_stories=bool(r.get("for_stories", str(r.get("name") or "").strip().lower() in {"писатель", "редактор", "художник"})),
             )
         admin_role = roles_map.get(SYSTEM_ADMIN_ROLE_ID)
         self._person_color_by_id = {_ADMIN_PERSON_ID: (admin_role.color if admin_role else "#3A7CFF")}
@@ -771,6 +825,7 @@ class BoardPage(QWidget):
                     color=str(r.get("color", "#BDBDBD")),
                     priority=int(r.get("priority", 9999)),
                     locked=bool(r.get("locked", False)),
+                    for_stories=bool(r.get("for_stories", str(r.get("name") or "").strip().lower() in {"писатель", "редактор", "художник"})),
                 )
             theme = self.storage.get_ui_settings().get("theme", "dark")
             p = get_palette(theme)
@@ -831,7 +886,7 @@ class BoardPage(QWidget):
                     return False
             return True
 
-        admin_tasks_cnt = self.storage.compute_active_tasks_count_for_subject(_ADMIN_PERSON_ID)
+        admin_tasks_cnt = self._compute_people_counter(_ADMIN_PERSON_ID)
         if _passes_filters(admin_role_ids, str(admin_st_id)):
             rows.append(
                 (
@@ -875,7 +930,7 @@ class BoardPage(QWidget):
             st = statuses.get(status_id) or statuses.get(SYSTEM_STATUS_NONE_ID)
             status_name = st.name if st else "Без статуса"
             status_color = (st.color if st else "#9E9E9E") or "#9E9E9E"
-            tasks_cnt = self.storage.compute_active_tasks_count_for_subject(sid) if sid else 0
+            tasks_cnt = self._compute_people_counter(sid) if sid else 0
             if _passes_filters(role_ids, status_id):
                 rows.append(
                     (
@@ -1296,7 +1351,10 @@ class BoardPage(QWidget):
         right_col.setSpacing(8)
 
         cnt = QLabel(str(int(tasks_cnt)))
-        cnt.setToolTip("Активных задач (В процессе + Отложено)")
+        if str(self._people_counter_mode) == "stories":
+            cnt.setToolTip("Историй у исполнителя (не архив)")
+        else:
+            cnt.setToolTip("Активных задач (В процессе + Отложено)")
         cnt.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignTop)
         cnt.setStyleSheet("font-weight:900; font-size: 12pt; background: transparent;")
 
@@ -1352,11 +1410,35 @@ class BoardPage(QWidget):
         t = next((x for x in tasks if str(x.get("id")) == str(task_id)), None)
         if not isinstance(t, dict):
             return
-        dlg = TaskViewDialog(parent=self, storage=self.storage, column_kind=str(kind), task=t)
+        dlg = TaskViewDialog(
+            parent=self,
+            storage=self.storage,
+            column_kind=str(kind),
+            task=t,
+            on_open_story=self._open_story_by_id,
+        )
         # Accepted means user pressed "Edit" (which may have changed the task).
         if dlg.exec() != dlg.DialogCode.Accepted:
             return
         self.refresh_from_storage(force=True)
+
+    def _open_story_by_id(self, story_id: str) -> None:
+        if not self._stories_enabled or self.stories_page is None:
+            return
+        sid = str(story_id or "")
+        if not sid:
+            return
+        # Switch to stories page and select story.
+        self._columns_visible = False
+        self._people_counter_mode = "stories"
+        try:
+            self.stories_page.reload_from_storage()
+            self.main_stack.setCurrentWidget(self.stories_page)
+            self.stories_page.select_story_by_id(sid)
+        except Exception:
+            return
+        self._sync_columns_visibility_ui()
+        self._refresh_people_after_filter_change()
 
     def _on_task_dropped(self, task_id: str, from_kind: str, to_kind: str) -> None:
         try:
@@ -1720,6 +1802,86 @@ class BoardPage(QWidget):
     def _open_admin(self) -> None:
         if callable(self.on_open_admin):
             self.on_open_admin()
+
+    def _hide_task_columns(self) -> None:
+        if not self._stories_enabled or self.stories_page is None:
+            return
+        if not self._columns_visible:
+            return
+        self._columns_visible = False
+        self._people_counter_mode = "stories"
+        # Ensure we show the latest roles/taxonomy after admin changes.
+        try:
+            self.stories_page.reload_from_storage()
+        except Exception:
+            pass
+        self.main_stack.setCurrentWidget(self.stories_page)
+        self._sync_columns_visibility_ui()
+        # Rebuild people panel counts for stories mode.
+        self._refresh_people_after_filter_change()
+
+    def _show_task_columns(self) -> None:
+        if not self._stories_enabled:
+            return
+        if self._columns_visible:
+            return
+        self._columns_visible = True
+        self._people_counter_mode = "tasks"
+        self.main_stack.setCurrentWidget(self.columns_inner)
+        self._sync_columns_visibility_ui()
+        # Rebuild people panel counts for tasks mode.
+        self._refresh_people_after_filter_change()
+
+    def _compute_people_counter(self, subject_id: str) -> int:
+        """
+        Counter displayed on people cards:
+        - tasks mode: active tasks (progress + delayed)
+        - stories mode: number of non-archived stories where the person is assigned (any role)
+        """
+        pid = str(subject_id or "")
+        if not pid:
+            return 0
+        if str(self._people_counter_mode) != "stories":
+            return int(self.storage.compute_active_tasks_count_for_subject(pid))
+        try:
+            stories = self.storage.get_stories()
+        except Exception:
+            stories = []
+        cnt = 0
+        for st in stories:
+            if not isinstance(st, dict):
+                continue
+            if bool(st.get("archived", False)):
+                continue
+            assignments = st.get("assignments")
+            if not isinstance(assignments, dict):
+                continue
+            found = False
+            for pids in assignments.values():
+                if not isinstance(pids, list):
+                    continue
+                if pid in [str(x) for x in pids if x is not None]:
+                    found = True
+                    break
+            if found:
+                cnt += 1
+        return int(cnt)
+
+    def _on_stories_changed(self) -> None:
+        # If we're on the Stories page, update people panel counters immediately.
+        if str(self._people_counter_mode) != "stories":
+            return
+        self._refresh_people_after_filter_change()
+
+    def _sync_columns_visibility_ui(self) -> None:
+        if not self._stories_enabled:
+            return
+        # Keep buttons in sync and avoid leaving focus on a hidden widget.
+        vis = bool(self._columns_visible)
+        if hasattr(self, "home_btn"):
+            self.home_btn.setEnabled(not vis)
+        if hasattr(self, "clipboard_btn"):
+            self.clipboard_btn.setEnabled(vis)
 
     def _update_people_arrow(self) -> None:
         w = int(self.people_panel.maximumWidth())

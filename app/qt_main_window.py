@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import sys
 
 from PySide6.QtGui import QCloseEvent, QIcon
@@ -118,8 +119,28 @@ class MainWindow(QMainWindow):
 
 def run_app() -> None:
     storage = Storage()
+    _set_windows_app_user_model_id("DelTA")
     app = QApplication.instance() or QApplication(sys.argv)
+
+    # Windows taskbar icon typically follows the app/window icon, not only the embedded EXE icon.
+    assets = get_interface_assets()
+    if assets.icon_ico.exists():
+        app.setWindowIcon(QIcon(str(assets.icon_ico)))
+    elif assets.icon_png.exists():
+        app.setWindowIcon(QIcon(str(assets.icon_png)))
+
     win = MainWindow(storage=storage)
     win.show()
     sys.exit(app.exec())
+
+
+def _set_windows_app_user_model_id(app_id: str) -> None:
+    if os.name != "nt":
+        return
+    try:
+        import ctypes
+
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(str(app_id))
+    except Exception:
+        return
 

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import math
 from datetime import datetime
+from typing import Callable
 
 from PySide6.QtCore import Qt, QDateTime
 from PySide6.QtCore import QSize
@@ -84,11 +85,20 @@ def _dt_from_iso_local(iso: str | None) -> datetime | None:
 
 
 class TaskViewDialog(QDialog):
-    def __init__(self, parent: QWidget, storage: Storage, column_kind: str, *, task: dict) -> None:
+    def __init__(
+        self,
+        parent: QWidget,
+        storage: Storage,
+        column_kind: str,
+        *,
+        task: dict,
+        on_open_story: Callable[[str], None] | None = None,
+    ) -> None:
         super().__init__(parent)
         self.storage = storage
         self.column_kind = str(column_kind)
         self._task = task or {}
+        self._on_open_story = on_open_story
 
         self.setWindowTitle("Просмотр задания")
         self.setModal(True)
@@ -126,6 +136,11 @@ class TaskViewDialog(QDialog):
         self.title_edit.setText(str(self._task.get("title") or self._task.get("name") or ""))
         row_title.addWidget(self.title_edit, 1)
         root.addLayout(row_title)
+
+        # Story link (experimental mode only)
+        self._story_box: QGroupBox | None = None
+        self._story_btn: QPushButton | None = None
+        self._maybe_build_story_box(root)
 
         # Responsible (read-only list)
         box_resp = QGroupBox("Ответственные")
@@ -244,6 +259,52 @@ class TaskViewDialog(QDialog):
         root.addWidget(box_desc, 1)
 
         self._populate()
+
+    def _maybe_build_story_box(self, root: QVBoxLayout) -> None:
+        try:
+            exp = bool(self.storage.get_profile().get("experimental_mode", False))
+        except Exception:
+            exp = False
+        if not exp:
+            return
+        sid = str(self._task.get("story_id") or "").strip()
+        title = "—"
+        valid = False
+        if sid:
+            for st in self.storage.get_stories():
+                if not isinstance(st, dict):
+                    continue
+                if str(st.get("id") or "") != sid:
+                    continue
+                if bool(st.get("archived", False)):
+                    # archived => treat as missing
+                    sid = ""
+                    break
+                title = str(st.get("title") or "Без названия")
+                valid = True
+                break
+
+        box = QGroupBox("Связанная история")
+        lay = QHBoxLayout(box)
+        btn = QPushButton(title)
+        btn.setEnabled(valid and bool(self._on_open_story))
+        btn.setToolTip("Открыть историю" if btn.isEnabled() else "История не выбрана")
+        btn.setStyleSheet("text-align: left;")
+        if valid and callable(self._on_open_story):
+            btn.clicked.connect(lambda: self._open_story_and_close(sid))
+        lay.addWidget(btn, 1)
+        self._story_box = box
+        self._story_btn = btn
+        root.addWidget(box)
+
+    def _open_story_and_close(self, story_id: str) -> None:
+        sid = str(story_id or "")
+        if not sid or not callable(self._on_open_story):
+            return
+        try:
+            self._on_open_story(sid)
+        finally:
+            self.accept()
 
     def _open_subtasks_chain_expanded(self) -> None:
         dlg = QDialog(self)

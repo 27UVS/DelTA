@@ -159,6 +159,11 @@ class RoleDialog(QDialog):
         row3.addStretch(1)
         form.addLayout(row3)
 
+        self.for_stories_cb = QCheckBox("Использовать в сценариях (страница историй)")
+        self.for_stories_cb.setChecked(bool((role or {}).get("for_stories", False)))
+        self.for_stories_cb.setEnabled(not locked)
+        form.addWidget(self.for_stories_cb)
+
         root.addLayout(form)
 
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Cancel | QDialogButtonBox.StandardButton.Save)
@@ -196,8 +201,8 @@ class RoleDialog(QDialog):
             return
         self.color_edit.setText(c.name())
 
-    def payload(self) -> tuple[str, str, int]:
-        return (self.name_edit.text(), self.color_edit.text(), int(self.priority_spin.value()))
+    def payload(self) -> tuple[str, str, int, bool]:
+        return (self.name_edit.text(), self.color_edit.text(), int(self.priority_spin.value()), bool(self.for_stories_cb.isChecked()))
 
 
 class StatusDialog(QDialog):
@@ -376,15 +381,18 @@ class TablesPage(QWidget):
         self.statuses_tab = QWidget()
         self.tasks_tab = QWidget()
         self.subjects_tab = QWidget()
+        self.story_tab = QWidget()
         self.tabs.addTab(self.roles_tab, "Роли")
         self.tabs.addTab(self.statuses_tab, "Статусы")
         self.tabs.addTab(self.tasks_tab, "Задачи")
         self.tabs.addTab(self.subjects_tab, "Субъекты")
+        self.tabs.addTab(self.story_tab, "Сюжет")
 
         self._build_roles_tab()
         self._build_statuses_tab()
         self._build_tasks_tab()
         self._build_subjects_tab()
+        self._build_story_tab()
 
     def _apply_icon_button(self, btn: QPushButton, path: Path, *, tooltip: str) -> None:
         btn.setText("")
@@ -423,11 +431,12 @@ class TablesPage(QWidget):
         top.addWidget(self.btn_del_role)
         top.addStretch(1)
 
-        self.roles_table = QTableWidget(0, 3)
-        self.roles_table.setHorizontalHeaderLabels(["Название", "Цвет (HEX)", "Приоритет"])
+        self.roles_table = QTableWidget(0, 4)
+        self.roles_table.setHorizontalHeaderLabels(["Название", "Сценарии", "Цвет (HEX)", "Приоритет"])
         self.roles_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
         self.roles_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
         self.roles_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
+        self.roles_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
         self.roles_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self.roles_table.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
         self.roles_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
@@ -437,10 +446,11 @@ class TablesPage(QWidget):
         roles = sorted(self.storage.get_roles(), key=lambda r: (r.priority, r.name.lower()))
         roles = [r for r in roles if r.id != SYSTEM_NONE_ROLE_ID]
         self.roles_table.setRowCount(len(roles))
-        self._roles_row_id: list[str] = []
+        self._roles_row_id = []
         for i, r in enumerate(roles):
             self._roles_row_id.append(str(r.id))
             it_name = QTableWidgetItem(r.name)
+            it_fs = QTableWidgetItem("Да" if bool(getattr(r, "for_stories", False)) else "Нет")
             it_color = QTableWidgetItem(_get_role_display_color(r.color))
             it_pr = QTableWidgetItem(str(r.priority))
             # subtle color preview
@@ -449,9 +459,11 @@ class TablesPage(QWidget):
                 it_color.setForeground(QColor("#FFFFFF"))
             except Exception:
                 pass
+
             self.roles_table.setItem(i, 0, it_name)
-            self.roles_table.setItem(i, 1, it_color)
-            self.roles_table.setItem(i, 2, it_pr)
+            self.roles_table.setItem(i, 1, it_fs)
+            self.roles_table.setItem(i, 2, it_color)
+            self.roles_table.setItem(i, 3, it_pr)
 
     def _selected_role_id(self) -> str | None:
         row = self.roles_table.currentRow()
@@ -465,9 +477,9 @@ class TablesPage(QWidget):
         dlg = RoleDialog(self, self.storage, role=None)
         if dlg.exec() != QDialog.DialogCode.Accepted:
             return
-        name, color, pr = dlg.payload()
+        name, color, pr, for_stories = dlg.payload()
         try:
-            self.storage.add_role(name=name, color=color, priority=pr)
+            self.storage.add_role(name=name, color=color, priority=pr, for_stories=bool(for_stories))
             self.refresh_all()
         except Exception as e:
             QMessageBox.critical(self, "Ошибка", str(e))
@@ -484,13 +496,20 @@ class TablesPage(QWidget):
         dlg = RoleDialog(
             self,
             self.storage,
-            role={"id": role.id, "name": role.name, "color": role.color, "priority": role.priority, "locked": role.locked},
+            role={
+                "id": role.id,
+                "name": role.name,
+                "color": role.color,
+                "priority": role.priority,
+                "locked": role.locked,
+                "for_stories": bool(getattr(role, "for_stories", False)),
+            },
         )
         if dlg.exec() != QDialog.DialogCode.Accepted:
             return
-        name, color, pr = dlg.payload()
+        name, color, pr, for_stories = dlg.payload()
         try:
-            self.storage.update_role(role_id=rid, name=name, color=color, priority=pr)
+            self.storage.update_role(role_id=rid, name=name, color=color, priority=pr, for_stories=bool(for_stories))
             self.refresh_all()
         except Exception as e:
             QMessageBox.critical(self, "Ошибка", str(e))
@@ -792,4 +811,142 @@ class TablesPage(QWidget):
         self.refresh_statuses()
         self.refresh_subjects()
         self.refresh_tasks()
+        self.refresh_story_taxonomy()
+
+    # ---------------- Story taxonomy ----------------
+    def _build_story_tab(self) -> None:
+        root = QVBoxLayout(self.story_tab)
+        top = QHBoxLayout()
+        root.addLayout(top)
+
+        self.btn_add_story_item = QPushButton("Добавить")
+        self.btn_edit_story_item = QPushButton("Редактировать")
+        self.btn_del_story_item = QPushButton("Удалить")
+        self._apply_icon_button(self.btn_add_story_item, self._assets.add_button_png, tooltip="Добавить")
+        self._apply_icon_button(self.btn_edit_story_item, self._assets.edit_button_png, tooltip="Редактировать")
+        self._apply_icon_button(self.btn_del_story_item, self._assets.delete_button_png, tooltip="Удалить")
+        self.btn_add_story_item.clicked.connect(self._on_add_story_tax_item)
+        self.btn_edit_story_item.clicked.connect(self._on_edit_story_tax_item)
+        self.btn_del_story_item.clicked.connect(self._on_delete_story_tax_item)
+        top.addWidget(self.btn_add_story_item)
+        top.addWidget(self.btn_edit_story_item)
+        top.addWidget(self.btn_del_story_item)
+        top.addStretch(1)
+
+        self.story_table = QTableWidget(0, 2)
+        self.story_table.setHorizontalHeaderLabels(["Название", "Тип"])
+        self.story_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        self.story_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+        self.story_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self.story_table.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
+        self.story_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        root.addWidget(self.story_table, 1)
+
+    def refresh_story_taxonomy(self) -> None:
+        items = self.storage.get_story_taxonomy()
+        # order: seasons, arcs, sections; locked first inside each group
+        kind_order = {"season": 0, "arc": 1, "section": 2}
+        def _k(x: dict) -> tuple[int, int, str]:
+            k = str(x.get("kind") or "")
+            locked = 0 if bool(x.get("locked")) else 1
+            return (kind_order.get(k, 99), locked, str(x.get("name") or "").lower())
+        items = sorted(items, key=_k)
+        self._story_row_id: list[str] = []
+        self.story_table.setRowCount(len(items))
+        kind_label = {"season": "Сезон", "arc": "Арка", "section": "Раздел"}
+        for i, it in enumerate(items):
+            self._story_row_id.append(str(it.get("id") or ""))
+            name = str(it.get("name") or "")
+            k = str(it.get("kind") or "")
+            locked = bool(it.get("locked", False))
+            it_name = QTableWidgetItem(name)
+            if locked:
+                it_name.setForeground(QColor("#BDBDBD"))
+            self.story_table.setItem(i, 0, it_name)
+            self.story_table.setItem(i, 1, QTableWidgetItem(kind_label.get(k, k or "—")))
+
+    def _selected_story_tax_id(self) -> str | None:
+        row = self.story_table.currentRow()
+        if row < 0:
+            return None
+        if row >= len(getattr(self, "_story_row_id", [])):
+            return None
+        return str(self._story_row_id[row])
+
+    def _on_add_story_tax_item(self) -> None:
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Добавить элемент сюжета")
+        dlg.setModal(True)
+        lay = QVBoxLayout(dlg)
+        name_edit = QLineEdit()
+        kind_cb = QComboBox()
+        kind_cb.addItem("Сезон", "season")
+        kind_cb.addItem("Арка", "arc")
+        kind_cb.addItem("Раздел", "section")
+        lay.addWidget(QLabel("Название"))
+        lay.addWidget(name_edit)
+        lay.addWidget(QLabel("Тип"))
+        lay.addWidget(kind_cb)
+        btns = QDialogButtonBox(QDialogButtonBox.StandardButton.Cancel | QDialogButtonBox.StandardButton.Save)
+        btns.rejected.connect(dlg.reject)
+        btns.accepted.connect(dlg.accept)
+        lay.addWidget(btns)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        try:
+            self.storage.add_story_taxonomy_item(name=name_edit.text(), kind=str(kind_cb.currentData() or ""))
+            self.refresh_all()
+        except Exception as e:
+            QMessageBox.critical(self, "Ошибка", str(e))
+
+    def _on_edit_story_tax_item(self) -> None:
+        tid = self._selected_story_tax_id()
+        if not tid:
+            QMessageBox.information(self, "Инфо", "Выберите строку.")
+            return
+        items = {str(x.get("id")): x for x in self.storage.get_story_taxonomy()}
+        cur = items.get(tid)
+        if not isinstance(cur, dict):
+            return
+        if bool(cur.get("locked", False)):
+            QMessageBox.warning(self, "Запрещено", "Этот элемент нельзя редактировать.")
+            return
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Редактировать")
+        dlg.setModal(True)
+        lay = QVBoxLayout(dlg)
+        name_edit = QLineEdit(str(cur.get("name") or ""))
+        lay.addWidget(QLabel("Название"))
+        lay.addWidget(name_edit)
+        btns = QDialogButtonBox(QDialogButtonBox.StandardButton.Cancel | QDialogButtonBox.StandardButton.Save)
+        btns.rejected.connect(dlg.reject)
+        btns.accepted.connect(dlg.accept)
+        lay.addWidget(btns)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        try:
+            self.storage.update_story_taxonomy_item(tid, name=name_edit.text())
+            self.refresh_all()
+        except Exception as e:
+            QMessageBox.critical(self, "Ошибка", str(e))
+
+    def _on_delete_story_tax_item(self) -> None:
+        tid = self._selected_story_tax_id()
+        if not tid:
+            QMessageBox.information(self, "Инфо", "Выберите строку.")
+            return
+        items = {str(x.get("id")): x for x in self.storage.get_story_taxonomy()}
+        cur = items.get(tid)
+        if not isinstance(cur, dict):
+            return
+        if bool(cur.get("locked", False)):
+            QMessageBox.warning(self, "Запрещено", "Этот элемент нельзя удалить.")
+            return
+        if QMessageBox.question(self, "Подтверждение", f"Удалить '{cur.get('name','')}'?") != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            self.storage.delete_story_taxonomy_item(tid)
+            self.refresh_all()
+        except Exception as e:
+            QMessageBox.critical(self, "Ошибка", str(e))
 

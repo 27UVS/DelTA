@@ -1,11 +1,16 @@
 # -*- mode: python ; coding: utf-8 -*-
 
+from pathlib import Path
 from PyInstaller.utils.hooks import collect_submodules
 
 block_cipher = None
 
 hiddenimports = []
 hiddenimports += collect_submodules("PySide6")
+
+_ico = Path("assets/interface/icon_small.ico")
+_png = Path("assets/interface/icon.png")
+_icon_path = str(_ico) if _ico.exists() else (str(_png) if _png.exists() else None)
 
 a = Analysis(
     ["main.py"],
@@ -39,7 +44,7 @@ exe = EXE(
     strip=False,
     upx=True,
     console=False,
-    icon="assets/interface/icon_small.ico",
+    icon=_icon_path,
 )
 
 coll = COLLECT(

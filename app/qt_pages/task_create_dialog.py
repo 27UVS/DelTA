@@ -6,6 +6,7 @@ from datetime import datetime, timedelta, timezone
 from functools import partial
 from pathlib import Path
 from html import escape as _html_escape
+from typing import Callable
 
 from PySide6.QtCore import Qt, QDateTime, QDate, QTime
 from PySide6.QtCore import QSize
@@ -23,6 +24,8 @@ from PySide6.QtGui import (
     QTextListFormat,
     QTextFormat,
     QIcon,
+    QStandardItemModel,
+    QStandardItem,
 )
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -45,6 +48,7 @@ from PySide6.QtWidgets import (
     QScrollArea,
     QFrame,
 )
+from PySide6.QtCore import QTimer
 
 from app.storage import Storage, utc_now_iso, SYSTEM_STATUS_NONE_ID, APP_TZ
 from app.assets import get_interface_assets
@@ -139,18 +143,33 @@ class TaskCreateDialog(QDialog):
 
         self.setWindowTitle("Создать задание" if self._task is None else "Редактировать задание")
         self.setModal(True)
-        self.resize(760, 740)
+        # The dialog can get tall (subtasks + description + optional story picker).
+        # Keep a reasonable window height and let users scroll vertically.
+        self.resize(760, 640)
+        self.setMinimumHeight(520)
 
         root = QVBoxLayout(self)
         root.setContentsMargins(14, 14, 14, 14)
         root.setSpacing(12)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        content = QWidget()
+        scroll.setWidget(content)
+        lay = QVBoxLayout(content)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(12)
+        root.addWidget(scroll, 1)
 
         # Title
         row_title = QHBoxLayout()
         row_title.addWidget(QLabel("Название"), 0)
         self.title_edit = QLineEdit()
         row_title.addWidget(self.title_edit, 1)
-        root.addLayout(row_title)
+        lay.addLayout(row_title)
 
         # Responsible
         box_resp = QGroupBox("Ответственные")
@@ -160,7 +179,13 @@ class TaskCreateDialog(QDialog):
         self.resp_combo.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
         self.resp_combo.view().setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
         resp_l.addWidget(self.resp_combo)
-        root.addWidget(box_resp)
+        lay.addWidget(box_resp)
+
+        # Story link (experimental mode only)
+        self._story_box: QGroupBox | None = None
+        self.story_cb: QComboBox | None = None
+        self._stories_for_pick: list[dict] = []
+        self._maybe_build_story_picker(lay)
 
         # Dates
         box_dates = QGroupBox("Время")
@@ -218,7 +243,7 @@ class TaskCreateDialog(QDialog):
         row_flags.addStretch(1)
         dates_l.addLayout(row_flags)
 
-        root.addWidget(box_dates)
+        lay.addWidget(box_dates)
 
         # Subtasks (optional chain)
         box_sub = QGroupBox("Подзадачи")
@@ -238,10 +263,21 @@ class TaskCreateDialog(QDialog):
         sub_scroll.setMinimumHeight(300)
         sub_scroll.setMaximumHeight(480)
         sub_outer.addWidget(sub_scroll, 1)
-        self.add_sub_btn = QPushButton("Добавить подзадачу")
+        self.add_sub_btn = QPushButton("")
+        self.add_sub_btn.setToolTip("Добавить подзадачу")
+        pm_add = self._icons.load_pixmap(self._assets.add_subtask_png, (48, 48))
+        if pm_add is not None:
+            self.add_sub_btn.setIcon(QIcon(pm_add))
+            self.add_sub_btn.setIconSize(QSize(48, 48))
+        self.add_sub_btn.setFixedSize(70, 44)
+        self.add_sub_btn.setFlat(True)
+        self.add_sub_btn.setStyleSheet(
+            "QPushButton { padding: 0px; }"
+            "QPushButton::menu-indicator { width: 0px; }"
+        )
         self.add_sub_btn.clicked.connect(self._on_add_subtask_row)
         sub_outer.addWidget(self.add_sub_btn)
-        root.addWidget(box_sub)
+        lay.addWidget(box_sub)
 
         # Description
         box_desc = QGroupBox("Описание")
@@ -296,7 +332,7 @@ class TaskCreateDialog(QDialog):
         self.desc_edit.setAcceptRichText(True)
         self.desc_edit.setMinimumHeight(160)
         desc_l.addWidget(self.desc_edit, 1)
-        root.addWidget(box_desc, 1)
+        lay.addWidget(box_desc, 1)
 
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Cancel | QDialogButtonBox.StandardButton.Save)
         buttons.rejected.connect(self.reject)
@@ -310,6 +346,7 @@ class TaskCreateDialog(QDialog):
         self._people: list[PersonRef] = []
         self._resp_model = QStandardItemModel(self)
         self.resp_combo.setModel(self._resp_model)
+        self._resp_popup_reopen_pending = False
         self._load_people()
         self._update_resp_summary()
         if self._task is not None:
@@ -317,6 +354,41 @@ class TaskCreateDialog(QDialog):
         else:
             self._apply_new_task_default_times()
             self._sync_start_deadline_relation()
+
+    def _maybe_build_story_picker(self, root: QVBoxLayout) -> None:
+        try:
+            exp = bool(self.storage.get_profile().get("experimental_mode", False))
+        except Exception:
+            exp = False
+        if not exp:
+            return
+
+        box = QGroupBox("Связанная история")
+        lay = QVBoxLayout(box)
+        cb = QComboBox()
+        cb.setEditable(True)
+        cb.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
+        cb.setToolTip("Выберите историю или начните вводить название для поиска")
+        lay.addWidget(cb)
+
+        # Populate with non-archived stories.
+        self._stories_for_pick = [s for s in self.storage.get_stories() if isinstance(s, dict) and not bool(s.get("archived", False))]
+        cb.addItem("—", "")
+        for st in self._stories_for_pick:
+            cb.addItem(str(st.get("title") or "Без названия"), str(st.get("id") or ""))
+
+        # Make completer search "contains"
+        try:
+            comp = cb.completer()
+            if comp is not None:
+                comp.setCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
+                comp.setFilterMode(Qt.MatchFlag.MatchContains)
+        except Exception:
+            pass
+
+        self._story_box = box
+        self.story_cb = cb
+        root.addWidget(box)
 
     def _apply_new_task_default_times(self) -> None:
         """New task: start = now, deadline = now + 24h (visible defaults, not 'не выбрано')."""
@@ -408,6 +480,17 @@ class TaskCreateDialog(QDialog):
         self._on_flags_changed()
         self._load_subtasks()
         self._sync_start_deadline_relation()
+
+        # story link
+        if self.story_cb is not None:
+            sid = str(t.get("story_id") or "").strip()
+            # Only allow non-archived existing stories; otherwise clear.
+            valid_ids = {str(s.get("id") or "") for s in self._stories_for_pick}
+            if sid and sid in valid_ids:
+                idx = self.story_cb.findData(sid)
+                self.story_cb.setCurrentIndex(idx if idx >= 0 else 0)
+            else:
+                self.story_cb.setCurrentIndex(0)
 
     def _default_subtask_responsible(self) -> str:
         ids = self._selected_responsibles()
@@ -580,6 +663,27 @@ class TaskCreateDialog(QDialog):
             return
         it.setCheckState(Qt.CheckState.Checked if it.checkState() != Qt.CheckState.Checked else Qt.CheckState.Unchecked)
         self._update_resp_summary()
+        # Keep the popup open when clicking inside the expanded list.
+        # QComboBox normally closes its popup on item click; we re-open it immediately.
+        if not self._resp_popup_reopen_pending:
+            self._resp_popup_reopen_pending = True
+            view = self.resp_combo.view()
+            sb = getattr(view, "verticalScrollBar", None)
+            scroll_val = sb().value() if callable(sb) and sb() is not None else None
+
+            def _reopen() -> None:
+                self._resp_popup_reopen_pending = False
+                try:
+                    self.resp_combo.showPopup()
+                    if scroll_val is not None:
+                        v = self.resp_combo.view()
+                        vsb = v.verticalScrollBar()
+                        if vsb is not None:
+                            vsb.setValue(int(scroll_val))
+                except Exception:
+                    return
+
+            QTimer.singleShot(0, _reopen)
 
     def _selected_responsibles(self) -> list[str]:
         ids: list[str] = []
@@ -672,6 +776,21 @@ class TaskCreateDialog(QDialog):
             "status_id": SYSTEM_STATUS_NONE_ID,
             "subtasks": subtasks,
         }
+        # story link (experimental mode only)
+        if self.story_cb is not None:
+            valid_ids = {str(s.get("id") or "") for s in self._stories_for_pick}
+            sid = str(self.story_cb.currentData() or "").strip()
+            txt = str(self.story_cb.currentText() or "").strip()
+            # If user typed a name that doesn't match any story, block save and ask to pick a valid one.
+            if (not sid) and txt and txt != "—":
+                QMessageBox.warning(
+                    self,
+                    "История не найдена",
+                    "Указанной истории не существует.\n"
+                    "Выберите историю из списка/поиска или поставьте прочерк (—).",
+                )
+                return
+            payload["story_id"] = sid if sid and sid in valid_ids else None
 
         try:
             if self._task is None:
@@ -728,21 +847,41 @@ class TaskCreateDialog(QDialog):
             fmt.setFontStrikeOut(not self.desc_edit.currentCharFormat().fontStrikeOut())
         self._merge_char_format(fmt)
 
-    def _fmt_bullets(self) -> None:
+    def _toggle_list(self, style: QTextListFormat.Style) -> None:
         cur = self.desc_edit.textCursor()
         cur.beginEditBlock()
-        lf = QTextListFormat()
-        lf.setStyle(QTextListFormat.Style.ListDisc)
-        cur.createList(lf)
-        cur.endEditBlock()
+        try:
+            cur_list = cur.currentList()
+            if cur_list is not None and cur_list.format().style() == style:
+                # Remove list formatting from selected blocks (or current block).
+                doc = cur.document()
+                start = cur.selectionStart()
+                end = cur.selectionEnd()
+                tmp = QTextCursor(doc)
+                tmp.setPosition(start)
+                # Ensure we operate on whole blocks.
+                tmp.movePosition(QTextCursor.MoveOperation.StartOfBlock)
+                while True:
+                    bf = tmp.blockFormat()
+                    bf.setObjectIndex(-1)
+                    tmp.setBlockFormat(bf)
+                    if tmp.position() >= end:
+                        break
+                    if not tmp.movePosition(QTextCursor.MoveOperation.NextBlock):
+                        break
+                return
+
+            lf = QTextListFormat()
+            lf.setStyle(style)
+            cur.createList(lf)
+        finally:
+            cur.endEditBlock()
+
+    def _fmt_bullets(self) -> None:
+        self._toggle_list(QTextListFormat.Style.ListDisc)
 
     def _fmt_numbers(self) -> None:
-        cur = self.desc_edit.textCursor()
-        cur.beginEditBlock()
-        lf = QTextListFormat()
-        lf.setStyle(QTextListFormat.Style.ListDecimal)
-        cur.createList(lf)
-        cur.endEditBlock()
+        self._toggle_list(QTextListFormat.Style.ListDecimal)
 
     def _fmt_link(self) -> None:
         url, ok = QInputDialog.getText(self, "Вставить ссылку", "URL (например https://example.com):")
