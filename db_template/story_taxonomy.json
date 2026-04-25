@@ -1,0 +1,28 @@
+{
+  "items": [
+    {
+      "id": "season_all",
+      "name": "Все",
+      "kind": "season",
+      "locked": true
+    },
+    {
+      "id": "arc_all",
+      "name": "Все",
+      "kind": "arc",
+      "locked": true
+    },
+    {
+      "id": "section_actual",
+      "name": "Актуальные",
+      "kind": "section",
+      "locked": true
+    },
+    {
+      "id": "section_not_actual",
+      "name": "Не актуальные",
+      "kind": "section",
+      "locked": true
+    }
+  ]
+}
