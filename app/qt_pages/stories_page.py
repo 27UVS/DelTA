@@ -16,6 +16,7 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QListWidget,
     QListWidgetItem,
+    QMessageBox,
     QPushButton,
     QScrollArea,
     QSizePolicy,
@@ -143,11 +144,13 @@ class StoriesPage(QWidget):
         edit_row = QHBoxLayout()
         edit_row.addStretch(1)
         self.edit_btn = QPushButton("Редактировать")
+        self.delete_btn = QPushButton("Полное удаление")
         self.save_btn = QPushButton("Сохранить")
         self.cancel_btn = QPushButton("Отмена")
         self.save_btn.setVisible(False)
         self.cancel_btn.setVisible(False)
         edit_row.addWidget(self.edit_btn)
+        edit_row.addWidget(self.delete_btn)
         edit_row.addWidget(self.save_btn)
         edit_row.addWidget(self.cancel_btn)
         d_l.addLayout(edit_row)
@@ -215,6 +218,7 @@ class StoriesPage(QWidget):
         self.open_url_btn.clicked.connect(self._on_open_url)
         self.archive_btn.clicked.connect(self._on_toggle_archive)
         self.edit_btn.clicked.connect(self._enter_edit_mode)
+        self.delete_btn.clicked.connect(self._on_delete_story)
         self.save_btn.clicked.connect(self._save_draft)
         self.cancel_btn.clicked.connect(self._cancel_edit_mode)
 
@@ -601,6 +605,7 @@ class StoriesPage(QWidget):
     def _set_editing(self, editing: bool) -> None:
         self._editing = bool(editing)
         self.edit_btn.setVisible(not self._editing)
+        self.delete_btn.setVisible(not self._editing)
         self.save_btn.setVisible(self._editing)
         self.cancel_btn.setVisible(self._editing)
 
@@ -617,6 +622,53 @@ class StoriesPage(QWidget):
         for rid, box in self._role_boxes.items():
             box["search"].setEnabled(enabled)
             box["chips"].setEnabled(enabled)
+
+    def _on_delete_story(self) -> None:
+        sid = str(self._selected_story_id or "")
+        story = next((s for s in self._stories if str(s.get("id")) == sid), None)
+        if not sid or not isinstance(story, dict):
+            return
+        if self._editing:
+            return
+
+        title = str(story.get("title") or "Без названия").strip()
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Question)
+        box.setWindowTitle("Полное удаление")
+        box.setText(
+            "История будет удалена полностью и безвозвратно.\n"
+            "Если она была привязана к задачам — связь будет снята.\n\n"
+            f"Удалить «{title}»?"
+        )
+        box.setStandardButtons(QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+        box.setDefaultButton(QMessageBox.StandardButton.No)
+        try:
+            btn_yes = box.button(QMessageBox.StandardButton.Yes)
+            if btn_yes is not None:
+                btn_yes.setText("Да")
+            btn_no = box.button(QMessageBox.StandardButton.No)
+            if btn_no is not None:
+                btn_no.setText("Нет")
+        except Exception:
+            pass
+
+        res = box.exec()
+        if res != int(QMessageBox.StandardButton.Yes):
+            return
+
+        try:
+            self.storage.delete_story(sid)
+        except Exception:
+            return
+
+        self._selected_story_id = None
+        self._stories = self.storage.get_stories()
+        self._refresh_story_list()
+        self._apply_story_to_details(None)
+        try:
+            self.stories_changed.emit()
+        except Exception:
+            pass
 
     def _enter_edit_mode(self) -> None:
         sid = str(self._selected_story_id or "")
@@ -711,23 +763,32 @@ class StoriesPage(QWidget):
         if q:
             people = [p for p in people if q in _norm(p.name)]
 
-        assignments = story.get("assignments") if isinstance(story.get("assignments"), dict) else {}
+        # While editing, selection lives in _draft; using saved story here drops unsaved picks
+        # and rebuild-from-search fires toggled -> _toggle and corrupts the draft.
+        if self._editing and isinstance(self._draft, dict):
+            da = self._draft.get("assignments")
+            assignments = da if isinstance(da, dict) else {}
+        else:
+            assignments = story.get("assignments") if isinstance(story.get("assignments"), dict) else {}
         selected = set([str(x) for x in (assignments.get(rid) or []) if str(x)])
 
         def _toggle(pid: str, on: bool) -> None:
-            cur = set(selected)
-            if on:
-                cur.add(str(pid))
-            else:
-                cur.discard(str(pid))
-            # In edit mode, only update draft; otherwise ignore changes (read-only).
+            # Must read current draft each time — `selected` is frozen at last refresh;
+            # otherwise the 2nd+ click in the same role rebuilds cur from stale set and drops prior picks.
             if not self._editing or not isinstance(self._draft, dict):
                 return
             d_as = self._draft.get("assignments")
             if not isinstance(d_as, dict):
                 d_as = {}
-            d_as = {**d_as, rid: sorted(cur)}
-            self._draft["assignments"] = d_as
+            cur_list = d_as.get(rid) or []
+            if not isinstance(cur_list, list):
+                cur_list = []
+            cur = {str(x) for x in cur_list if str(x)}
+            if on:
+                cur.add(str(pid))
+            else:
+                cur.discard(str(pid))
+            self._draft["assignments"] = {**d_as, rid: sorted(cur)}
 
         self._role_boxes[rid]["chips"].set_items(
             [(p.id, p.name) for p in people],
@@ -811,7 +872,9 @@ class _ChipList(QWidget):
         for pid, name in self._items:
             b = QPushButton(str(name or "—"))
             b.setCheckable(True)
+            b.blockSignals(True)
             b.setChecked(str(pid) in self._selected)
+            b.blockSignals(False)
             b.setCursor(Qt.CursorShape.PointingHandCursor)
             b.setStyleSheet(
                 "QPushButton{padding:6px 10px; border-radius:14px; text-align:left;}"

@@ -447,6 +447,25 @@ class Storage:
     def set_story_archived(self, story_id: str, archived: bool) -> dict[str, Any]:
         return self.update_story(str(story_id), {"archived": bool(archived)})
 
+    def delete_story(self, story_id: str) -> None:
+        sid = str(story_id or "")
+        if not sid:
+            raise ValueError("story_id is empty")
+        stories = self.get_stories()
+        target = next((s for s in stories if str(s.get("id")) == sid), None)
+        if not target:
+            raise ValueError("Story not found")
+
+        # Remove story link from all tasks referencing it.
+        try:
+            self._unlink_tasks_from_story(sid)
+        except Exception:
+            # Best-effort: even if unlinking fails, still attempt story removal.
+            pass
+
+        stories = [s for s in stories if str(s.get("id")) != sid]
+        self.save_stories(stories)
+
     def _unlink_tasks_from_story(self, story_id: str) -> None:
         """Remove story link from all tasks referencing the story (safe if none)."""
         sid = str(story_id or "")
