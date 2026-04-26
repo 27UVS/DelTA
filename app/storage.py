@@ -354,6 +354,8 @@ class Storage:
             story["archived"] = False
         if not story.get("status_id"):
             story["status_id"] = self.get_story_default_status_id()
+        if "synopsis" in story:
+            story["synopsis"] = str(story.get("synopsis") or "")
         # Taxonomy
         if "season_id" in story:
             story["season_id"] = str(story.get("season_id") or "season_all")
@@ -411,6 +413,8 @@ class Storage:
             was_archived = bool(s.get("archived", False))
             merged = copy.deepcopy(s)
             merged.update(copy.deepcopy(patch) if isinstance(patch, dict) else {})
+            if "synopsis" in merged:
+                merged["synopsis"] = str(merged.get("synopsis") or "")
             if "season_id" in merged:
                 merged["season_id"] = str(merged.get("season_id") or "season_all")
             if "arc_id" in merged:

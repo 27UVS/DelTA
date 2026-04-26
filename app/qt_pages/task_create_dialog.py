@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import uuid
+import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from functools import partial
@@ -8,7 +9,7 @@ from pathlib import Path
 from html import escape as _html_escape
 from typing import Callable
 
-from PySide6.QtCore import Qt, QDateTime, QDate, QTime
+from PySide6.QtCore import Qt, QDateTime, QDate, QTime, QMimeData
 from PySide6.QtCore import QSize
 from PySide6.QtGui import (
     QPixmap,
@@ -79,6 +80,67 @@ def _dt_to_iso(dt: datetime) -> str:
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=APP_TZ)
     return dt.astimezone(APP_TZ).isoformat(timespec="seconds")
+
+
+_RE_STYLE_BG = re.compile(r"background(?:-color)?\s*:\s*[^;\"']+;?", re.IGNORECASE)
+_RE_BG_COLOR_ATTR = re.compile(r'\sbgcolor\s*=\s*(?:"[^"]*"|\'[^\']*\'|[^\s>]+)', re.IGNORECASE)
+_RE_STYLE_COLOR = re.compile(r"color\s*:\s*[^;\"']+;?", re.IGNORECASE)
+_RE_COLOR_ATTR = re.compile(r'\scolor\s*=\s*(?:"[^"]*"|\'[^\']*\'|[^\s>]+)', re.IGNORECASE)
+
+
+def _strip_background_html(html: str) -> str:
+    """Remove pasted white backgrounds (background/background-color/bgcolor)."""
+    s = str(html or "")
+    if not s:
+        return s
+    s = _RE_BG_COLOR_ATTR.sub("", s)
+
+    def _fix_style(m):
+        val = m.group(0)
+        cleaned = _RE_STYLE_BG.sub("", val)
+        return cleaned
+
+    s = re.sub(r'style\s*=\s*"[^"]*"', _fix_style, s, flags=re.IGNORECASE)
+    s = re.sub(r"style\s*=\s*'[^']*'", _fix_style, s, flags=re.IGNORECASE)
+    return s
+
+
+def _sanitize_rich_html_for_dark(html: str) -> str:
+    """
+    Make pasted rich HTML readable on dark background:
+    - remove backgrounds
+    - remove forced text colors (so editor's stylesheet can apply white)
+    """
+    s = _strip_background_html(html)
+    if not s:
+        return s
+    s = _RE_COLOR_ATTR.sub("", s)
+
+    def _fix_style_color(m):
+        val = m.group(0)
+        cleaned = _RE_STYLE_COLOR.sub("", val)
+        return cleaned
+
+    s = re.sub(r'style\s*=\s*"[^"]*"', _fix_style_color, s, flags=re.IGNORECASE)
+    s = re.sub(r"style\s*=\s*'[^']*'", _fix_style_color, s, flags=re.IGNORECASE)
+    return s
+
+
+class _SanitizedRichTextEdit(QTextEdit):
+    """QTextEdit that strips background styles on paste."""
+
+    def insertFromMimeData(self, source) -> None:  # type: ignore[override]
+        try:
+            if source is not None and source.hasHtml():
+                html = _sanitize_rich_html_for_dark(str(source.html() or ""))
+                md = QMimeData()
+                md.setHtml(html)
+                if source.hasText():
+                    md.setText(source.text())
+                return super().insertFromMimeData(md)
+        except Exception:
+            pass
+        super().insertFromMimeData(source)
 
 
 def _datetime_to_qdt(dt: datetime) -> QDateTime:
@@ -328,9 +390,22 @@ class TaskCreateDialog(QDialog):
         tools.addStretch(1)
         desc_l.addLayout(tools)
 
-        self.desc_edit = QTextEdit()
+        self.desc_edit = _SanitizedRichTextEdit()
         self.desc_edit.setAcceptRichText(True)
         self.desc_edit.setMinimumHeight(160)
+        # Unified editor style (same as story synopsis): white text, transparent background, consistent font.
+        self.desc_edit.setStyleSheet("QTextEdit{color:#FFFFFF; background: transparent;}")
+        try:
+            f = QFont(self.font())
+            f.setPointSize(max(10, int(f.pointSize())))
+            self.desc_edit.setFont(f)
+            self.desc_edit.document().setDefaultFont(f)
+        except Exception:
+            pass
+        try:
+            self.desc_edit.document().setDefaultStyleSheet("a{color:#64B5F6;}")
+        except Exception:
+            pass
         desc_l.addWidget(self.desc_edit, 1)
         lay.addWidget(box_desc, 1)
 
@@ -764,7 +839,7 @@ class TaskCreateDialog(QDialog):
         payload: dict = {
             "id": task_id,
             "title": title,
-            "description": self.desc_edit.toHtml().strip(),
+            "description": _sanitize_rich_html_for_dark(self.desc_edit.toHtml().strip()),
             "created_at": created_at,
             # compatibility with existing UI/admin table
             "responsible_subject_id": resp_ids[0],
@@ -804,7 +879,7 @@ class TaskCreateDialog(QDialog):
         self.accept()
 
     def _set_desc_from_storage(self, text: str) -> None:
-        s = (text or "").strip()
+        s = _sanitize_rich_html_for_dark((text or "").strip())
         # Backward compat: old data used plain text; new uses HTML from QTextEdit.
         if "<" in s and ">" in s and ("</" in s or "<br" in s or "<p" in s):
             self.desc_edit.setHtml(s)

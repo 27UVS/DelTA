@@ -371,7 +371,13 @@ class TaskViewDialog(QDialog):
             self.dead_dt.setDateTime(QDateTime(ed))
 
     def _set_desc_from_storage(self, text: str) -> None:
+        # Strip pasted white background styles for consistent dark theme display.
+        import re
+
         s = (text or "").strip()
+        if s:
+            s = re.sub(r'\sbgcolor\s*=\s*(?:"[^"]*"|\'[^\']*\'|[^\s>]+)', "", s, flags=re.IGNORECASE)
+            s = re.sub(r"background(?:-color)?\s*:\s*[^;\"']+;?", "", s, flags=re.IGNORECASE)
         # Backward compat: old data used plain text; new uses HTML from QTextEdit.
         if "<" in s and ">" in s and ("</" in s or "<br" in s or "<p" in s):
             self.desc_edit.setHtml(s)

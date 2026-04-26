@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from html import escape as _html_escape
+import re
 from typing import Any, Callable
 
-from PySide6.QtCore import Qt, QTimer, QSize, Signal
-from PySide6.QtGui import QColor, QDesktopServices, QPalette, QTextOption, QFont
+from PySide6.QtCore import Qt, QTimer, QSize, Signal, QMimeData, QItemSelectionModel
+from PySide6.QtGui import QColor, QDesktopServices, QPalette, QTextOption, QFont, QTextCharFormat, QTextCursor, QTextFormat, QTextListFormat, QBrush, QIcon
 from PySide6.QtWidgets import (
     QComboBox,
     QFrame,
@@ -24,14 +26,77 @@ from PySide6.QtWidgets import (
     QWidget,
     QCheckBox,
     QTextEdit,
+    QInputDialog,
 )
 
+from app.assets import get_interface_assets
 from app.storage import Storage, SYSTEM_NONE_ROLE_ID
 from app.qt_widgets.flow_layout import FlowLayout
 
 
 def _norm(s: str) -> str:
     return re.sub(r"\s+", " ", str(s or "")).strip().lower()
+
+
+_RE_STYLE_BG = re.compile(r"background(?:-color)?\s*:\s*[^;\"']+;?", re.IGNORECASE)
+_RE_BG_COLOR_ATTR = re.compile(r'\sbgcolor\s*=\s*(?:"[^"]*"|\'[^\']*\'|[^\s>]+)', re.IGNORECASE)
+_RE_STYLE_COLOR = re.compile(r"color\s*:\s*[^;\"']+;?", re.IGNORECASE)
+_RE_COLOR_ATTR = re.compile(r'\scolor\s*=\s*(?:"[^"]*"|\'[^\']*\'|[^\s>]+)', re.IGNORECASE)
+
+
+def _strip_background_html(html: str) -> str:
+    """Remove pasted white backgrounds (background/background-color/bgcolor)."""
+    s = str(html or "")
+    if not s:
+        return s
+    s = _RE_BG_COLOR_ATTR.sub("", s)
+
+    def _fix_style(m):
+        val = m.group(0)
+        cleaned = _RE_STYLE_BG.sub("", val)
+        return cleaned
+
+    s = re.sub(r'style\s*=\s*"[^"]*"', _fix_style, s, flags=re.IGNORECASE)
+    s = re.sub(r"style\s*=\s*'[^']*'", _fix_style, s, flags=re.IGNORECASE)
+    return s
+
+
+def _sanitize_rich_html_for_dark(html: str) -> str:
+    """
+    Make pasted rich HTML readable on dark background:
+    - remove backgrounds
+    - remove forced text colors (so the editor's stylesheet can apply white)
+    """
+    s = _strip_background_html(html)
+    if not s:
+        return s
+    s = _RE_COLOR_ATTR.sub("", s)
+
+    def _fix_style_color(m):
+        val = m.group(0)
+        cleaned = _RE_STYLE_COLOR.sub("", val)
+        return cleaned
+
+    s = re.sub(r'style\s*=\s*"[^"]*"', _fix_style_color, s, flags=re.IGNORECASE)
+    s = re.sub(r"style\s*=\s*'[^']*'", _fix_style_color, s, flags=re.IGNORECASE)
+    return s
+
+
+class _SanitizedRichTextEdit(QTextEdit):
+    """QTextEdit that strips background styles on paste."""
+
+    def insertFromMimeData(self, source) -> None:  # type: ignore[override]
+        try:
+            if source is not None and source.hasHtml():
+                html = _sanitize_rich_html_for_dark(str(source.html() or ""))
+                md = QMimeData()
+                md.setHtml(html)
+                if source.hasText():
+                    md.setText(source.text())
+                return super().insertFromMimeData(md)
+        except Exception:
+            pass
+        super().insertFromMimeData(source)
 
 
 @dataclass(frozen=True)
@@ -189,6 +254,78 @@ class StoriesPage(QWidget):
         top_l.addWidget(QLabel("Статус"), 3, 0)
         top_l.addWidget(self.status_cb, 3, 1)
         d_l.addWidget(top_box)
+
+        # Synopsis (story description)
+        synopsis_box = QGroupBox("Синопсис")
+        synopsis_l = QVBoxLayout(synopsis_box)
+        synopsis_tools = QHBoxLayout()
+
+        def _mk_btn(text: str, tooltip: str, cb) -> QPushButton:
+            b = QPushButton(text)
+            b.setToolTip(tooltip)
+            b.setFixedHeight(28)
+            b.clicked.connect(cb)
+            return b
+
+        self._syn_btn_bold = _mk_btn("B", "Жирный", self._syn_fmt_bold)
+        self._syn_btn_italic = _mk_btn("I", "Курсив", self._syn_fmt_italic)
+        self._syn_btn_underline = _mk_btn("U", "Подчёркнутый", self._syn_fmt_underline)
+        self._syn_btn_strike = _mk_btn("S", "Зачёркнутый", self._syn_fmt_strike)
+        self._syn_btn_left = _mk_btn("⟸", "По левому краю", lambda: self.synopsis_edit.setAlignment(Qt.AlignmentFlag.AlignLeft))
+        self._syn_btn_center = _mk_btn("≡", "По центру", lambda: self.synopsis_edit.setAlignment(Qt.AlignmentFlag.AlignHCenter))
+        self._syn_btn_right = _mk_btn("⟹", "По правому краю", lambda: self.synopsis_edit.setAlignment(Qt.AlignmentFlag.AlignRight))
+        self._syn_btn_justify = _mk_btn("▤", "По ширине", lambda: self.synopsis_edit.setAlignment(Qt.AlignmentFlag.AlignJustify))
+        self._syn_btn_bullets = _mk_btn("•", "Маркированный список", self._syn_fmt_bullets)
+        self._syn_btn_numbers = _mk_btn("1.", "Нумерованный список", self._syn_fmt_numbers)
+        self._syn_btn_link = _mk_btn("", "Вставить ссылку", self._syn_fmt_link)
+        self._syn_btn_link.setFixedSize(34, 28)
+        try:
+            assets = get_interface_assets()
+            if assets.link_button_png.exists():
+                self._syn_btn_link.setIcon(QIcon(str(assets.link_button_png)))
+                self._syn_btn_link.setIconSize(QSize(18, 18))
+        except Exception:
+            pass
+        self._syn_btn_unlink = _mk_btn("⌧", "Убрать ссылку с выделенного текста", self._syn_fmt_unlink)
+        self._syn_btn_unlink.setFixedSize(34, 28)
+
+        for w in [
+            self._syn_btn_bold,
+            self._syn_btn_italic,
+            self._syn_btn_underline,
+            self._syn_btn_strike,
+            self._syn_btn_left,
+            self._syn_btn_center,
+            self._syn_btn_right,
+            self._syn_btn_justify,
+            self._syn_btn_bullets,
+            self._syn_btn_numbers,
+            self._syn_btn_link,
+            self._syn_btn_unlink,
+        ]:
+            synopsis_tools.addWidget(w, 0)
+        synopsis_tools.addStretch(1)
+        synopsis_l.addLayout(synopsis_tools)
+
+        self.synopsis_edit = _SanitizedRichTextEdit()
+        self.synopsis_edit.setAcceptRichText(True)
+        self.synopsis_edit.setMinimumHeight(160)
+        # Force readable text on dark background; pasted HTML colors are sanitized.
+        self.synopsis_edit.setStyleSheet("QTextEdit{color:#FFFFFF; background: transparent;}")
+        # Keep pasted / loaded text in the same font/size as user input.
+        try:
+            f = QFont(self.font())
+            f.setPointSize(max(10, int(f.pointSize())))
+            self.synopsis_edit.setFont(f)
+            self.synopsis_edit.document().setDefaultFont(f)
+        except Exception:
+            pass
+        try:
+            self.synopsis_edit.document().setDefaultStyleSheet("a{color:#64B5F6;}")
+        except Exception:
+            pass
+        synopsis_l.addWidget(self.synopsis_edit, 1)
+        d_l.addWidget(synopsis_box)
 
         self.archive_btn = QPushButton("В архив")
         d_l.addWidget(self.archive_btn, 0, Qt.AlignmentFlag.AlignRight)
@@ -541,12 +678,111 @@ class StoriesPage(QWidget):
         # not found in current filter -> clear
         self._apply_story_to_details(None)
 
-    def _on_story_selected(self, cur: QListWidgetItem | None, _prev: QListWidgetItem | None) -> None:
-        if self._editing:
-            self._cancel_edit_mode()
-        sid = str(cur.data(Qt.ItemDataRole.UserRole)) if cur else ""
+    def _on_story_selected(self, cur: QListWidgetItem | None, prev: QListWidgetItem | None) -> None:
+        next_sid = str(cur.data(Qt.ItemDataRole.UserRole)) if cur else ""
+        prev_sid = str(prev.data(Qt.ItemDataRole.UserRole)) if prev else ""
+
+        # If user tries to switch stories while editing, ask what to do with unsaved changes.
+        if self._editing and next_sid and next_sid != str(self._selected_story_id or ""):
+            box = QMessageBox(self)
+            box.setIcon(QMessageBox.Icon.Question)
+            box.setWindowTitle("Несохранённые изменения")
+            box.setText("Сохранить изменения в текущей истории?")
+            box.setStandardButtons(
+                QMessageBox.StandardButton.Save
+                | QMessageBox.StandardButton.Discard
+                | QMessageBox.StandardButton.Cancel
+            )
+            box.setDefaultButton(QMessageBox.StandardButton.Save)
+            try:
+                b_save = box.button(QMessageBox.StandardButton.Save)
+                if b_save is not None:
+                    b_save.setText("Сохранить")
+                b_discard = box.button(QMessageBox.StandardButton.Discard)
+                if b_discard is not None:
+                    b_discard.setText("Не сохранять")
+                b_cancel = box.button(QMessageBox.StandardButton.Cancel)
+                if b_cancel is not None:
+                    b_cancel.setText("Отмена")
+            except Exception:
+                pass
+
+            res = box.exec()
+            if res == int(QMessageBox.StandardButton.Cancel):
+                # Keep editing; revert list highlight to the currently edited story.
+                keep_sid = str(self._selected_story_id or prev_sid or "")
+                if keep_sid:
+                    # Do it twice: immediately (best effort) and on next tick (Qt may re-apply the click selection).
+                    self._force_select_story_item(keep_sid, scroll=False)
+                    QTimer.singleShot(0, lambda sid=keep_sid: self._force_select_story_item(sid, scroll=True))
+                    QTimer.singleShot(30, lambda sid=keep_sid: self._force_select_story_item(sid, scroll=False))
+                return
+            if res == int(QMessageBox.StandardButton.Save):
+                self._save_draft()
+                # Saving refreshes the list and may invalidate `cur`; switch by id on next tick.
+                QTimer.singleShot(0, lambda sid=next_sid: self._switch_to_story_by_id(sid))
+                return
+            else:
+                # Discard
+                self._cancel_edit_mode()
+                QTimer.singleShot(0, lambda sid=next_sid: self._switch_to_story_by_id(sid))
+                return
+
+            # Ensure in-memory stories are up-to-date after save/discard.
+            try:
+                self._stories = self.storage.get_stories()
+            except Exception:
+                pass
+
+        sid = next_sid
         self._selected_story_id = sid or None
         story = next((s for s in self._stories if str(s.get("id")) == sid), None)
+        self._apply_story_to_details(story if isinstance(story, dict) else None)
+
+    def _force_select_story_item(self, story_id: str, *, scroll: bool) -> None:
+        """Force list selection/highlight to a story id (used to cancel selection changes while editing)."""
+        sid = str(story_id or "")
+        if not sid:
+            return
+        self.list.blockSignals(True)
+        try:
+            try:
+                self.list.clearSelection()
+            except Exception:
+                pass
+            for i in range(self.list.count()):
+                it = self.list.item(i)
+                if it is None:
+                    continue
+                if str(it.data(Qt.ItemDataRole.UserRole) or "") == sid:
+                    self.list.setCurrentItem(it, QItemSelectionModel.SelectionFlag.ClearAndSelect)
+                    try:
+                        self.list.setCurrentRow(i)
+                    except Exception:
+                        pass
+                    if scroll:
+                        try:
+                            self.list.scrollToItem(it)
+                        except Exception:
+                            pass
+                    break
+        finally:
+            self.list.blockSignals(False)
+
+    def _switch_to_story_by_id(self, story_id: str) -> None:
+        """Switch selection + details by story id (safe after list refresh)."""
+        sid = str(story_id or "")
+        if not sid:
+            return
+        # Refresh storage snapshot (in case we just saved).
+        try:
+            self._stories = self.storage.get_stories()
+        except Exception:
+            pass
+        # Force list highlight and details without relying on stale QListWidgetItem objects.
+        self._selected_story_id = sid
+        self._force_select_story_item(sid, scroll=True)
+        story = next((s for s in self._stories if isinstance(s, dict) and str(s.get("id")) == sid), None)
         self._apply_story_to_details(story if isinstance(story, dict) else None)
 
     def _apply_story_to_details(self, story: dict[str, Any] | None) -> None:
@@ -567,6 +803,7 @@ class StoriesPage(QWidget):
 
         self.title_edit.setText(str(story.get("title") or ""))
         self.url_edit.setText(str(story.get("source_url") or ""))
+        self._set_synopsis_from_storage(str(story.get("synopsis") or ""))
 
         # classification
         season_id = str(story.get("season_id") or "season_all")
@@ -618,6 +855,22 @@ class StoriesPage(QWidget):
         self.url_edit.setEnabled(enabled)
         self.status_cb.setEnabled(enabled)
         self.archive_btn.setEnabled(enabled)
+        self.synopsis_edit.setEnabled(enabled)
+        for w in [
+            self._syn_btn_bold,
+            self._syn_btn_italic,
+            self._syn_btn_underline,
+            self._syn_btn_strike,
+            self._syn_btn_left,
+            self._syn_btn_center,
+            self._syn_btn_right,
+            self._syn_btn_justify,
+            self._syn_btn_bullets,
+            self._syn_btn_numbers,
+            self._syn_btn_link,
+            self._syn_btn_unlink,
+        ]:
+            w.setEnabled(enabled)
         # role assignment UI
         for rid, box in self._role_boxes.items():
             box["search"].setEnabled(enabled)
@@ -678,6 +931,7 @@ class StoriesPage(QWidget):
         self._draft = {
             "title": str(story.get("title") or ""),
             "source_url": str(story.get("source_url") or ""),
+            "synopsis": str(story.get("synopsis") or ""),
             "status_id": str(story.get("status_id") or ""),
             "season_id": str(story.get("season_id") or "season_all"),
             "arc_id": str(story.get("arc_id") or "arc_all"),
@@ -708,6 +962,7 @@ class StoriesPage(QWidget):
         patch = {
             "title": str(self.title_edit.text() or "").strip(),
             "source_url": str(self.url_edit.text() or "").strip(),
+            "synopsis": _sanitize_rich_html_for_dark(str(self.synopsis_edit.toHtml() or "").strip()),
             "status_id": str(self.status_cb.currentData() or ""),
             "season_id": str(self.story_season_cb.currentData() or "season_all"),
             "arc_id": str(self.story_arc_cb.currentData() or "arc_all"),
@@ -807,6 +1062,7 @@ class StoriesPage(QWidget):
                     "arc_id": arc_id if arc_id and arc_id != "arc_all" else "arc_all",
                     "title": "Новая история",
                     "source_url": "",
+                    "synopsis": "",
                     "assignments": {},
                     "archived": False,
                 }
@@ -818,6 +1074,8 @@ class StoriesPage(QWidget):
         self._refresh_story_list()
         self._selected_story_id = str(st.get("id") or "")
         self._select_story(self._selected_story_id)
+        # Auto-enter edit mode for newly created story.
+        self._enter_edit_mode()
         self.title_edit.setFocus()
         self.title_edit.selectAll()
 
@@ -839,6 +1097,116 @@ class StoriesPage(QWidget):
         new_val = not bool(self._draft.get("archived", False))
         self._draft["archived"] = bool(new_val)
         self.archive_btn.setText("Восстановить" if bool(new_val) else "В архив")
+
+    # --- Synopsis (rich text like task description) ---
+    def _set_synopsis_from_storage(self, text: str) -> None:
+        s = _sanitize_rich_html_for_dark((text or "").strip())
+        # Backward compat: allow plain text in older DBs.
+        if "<" in s and ">" in s and ("</" in s or "<br" in s or "<p" in s):
+            self.synopsis_edit.setHtml(s)
+        else:
+            self.synopsis_edit.setPlainText(s)
+
+    def _syn_merge_char_format(self, fmt: QTextCharFormat) -> None:
+        c = self.synopsis_edit.textCursor()
+        if not c.hasSelection():
+            self.synopsis_edit.mergeCurrentCharFormat(fmt)
+        else:
+            c.mergeCharFormat(fmt)
+            self.synopsis_edit.setTextCursor(c)
+
+    def _syn_fmt_bold(self) -> None:
+        fmt = QTextCharFormat()
+        w = self.synopsis_edit.fontWeight()
+        fmt.setFontWeight(400 if int(w) >= 600 else 700)
+        self._syn_merge_char_format(fmt)
+
+    def _syn_fmt_italic(self) -> None:
+        fmt = QTextCharFormat()
+        fmt.setFontItalic(not self.synopsis_edit.fontItalic())
+        self._syn_merge_char_format(fmt)
+
+    def _syn_fmt_underline(self) -> None:
+        fmt = QTextCharFormat()
+        fmt.setFontUnderline(not self.synopsis_edit.fontUnderline())
+        self._syn_merge_char_format(fmt)
+
+    def _syn_fmt_strike(self) -> None:
+        fmt = QTextCharFormat()
+        fmt.setFontStrikeOut(not fmt.fontStrikeOut())
+        cur = self.synopsis_edit.textCursor()
+        if cur.hasSelection():
+            fmt.setFontStrikeOut(not cur.charFormat().fontStrikeOut())
+        else:
+            fmt.setFontStrikeOut(not self.synopsis_edit.currentCharFormat().fontStrikeOut())
+        self._syn_merge_char_format(fmt)
+
+    def _syn_toggle_list(self, style: QTextListFormat.Style) -> None:
+        cur = self.synopsis_edit.textCursor()
+        cur.beginEditBlock()
+        try:
+            cur_list = cur.currentList()
+            if cur_list is not None and cur_list.format().style() == style:
+                # Remove list formatting from selected blocks (or current block).
+                doc = cur.document()
+                start = cur.selectionStart()
+                end = cur.selectionEnd()
+                tmp = QTextCursor(doc)
+                tmp.setPosition(start)
+                tmp.movePosition(QTextCursor.MoveOperation.StartOfBlock)
+                while True:
+                    bf = tmp.blockFormat()
+                    bf.setObjectIndex(-1)
+                    tmp.setBlockFormat(bf)
+                    if tmp.position() >= end:
+                        break
+                    if not tmp.movePosition(QTextCursor.MoveOperation.NextBlock):
+                        break
+                return
+
+            lf = QTextListFormat()
+            lf.setStyle(style)
+            cur.createList(lf)
+        finally:
+            cur.endEditBlock()
+
+    def _syn_fmt_bullets(self) -> None:
+        self._syn_toggle_list(QTextListFormat.Style.ListDisc)
+
+    def _syn_fmt_numbers(self) -> None:
+        self._syn_toggle_list(QTextListFormat.Style.ListDecimal)
+
+    def _syn_fmt_link(self) -> None:
+        url, ok = QInputDialog.getText(self, "Вставить ссылку", "URL (например https://example.com):")
+        if not ok:
+            return
+        url = str(url or "").strip()
+        if not url:
+            return
+        if "://" not in url:
+            url = "https://" + url
+        cur = self.synopsis_edit.textCursor()
+        sel_text = cur.selectedText().replace("\u2029", "\n")
+        text = sel_text.strip() or url
+        cur.insertHtml(f'<a href="{_html_escape(url)}">{_html_escape(text)}</a>')
+
+    def _syn_fmt_unlink(self) -> None:
+        cur = self.synopsis_edit.textCursor()
+        fmt = QTextCharFormat()
+        fmt.setAnchor(False)
+        fmt.clearProperty(QTextFormat.Property.AnchorHref)
+        fmt.clearProperty(QTextFormat.Property.AnchorName)
+        if cur.hasSelection():
+            fmt.setUnderlineStyle(QTextCharFormat.UnderlineStyle.NoUnderline)
+            text_clr = self.synopsis_edit.palette().color(QPalette.ColorRole.Text)
+            fmt.setForeground(QBrush(text_clr))
+        if not cur.hasSelection():
+            self.synopsis_edit.mergeCurrentCharFormat(fmt)
+            return
+        cur.beginEditBlock()
+        cur.mergeCharFormat(fmt)
+        cur.endEditBlock()
+        self.synopsis_edit.setTextCursor(cur)
 
 
 class _ChipList(QWidget):
