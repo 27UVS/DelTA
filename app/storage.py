@@ -220,6 +220,10 @@ class Storage:
             # Backward-compatible defaults for new settings.
             cur = self._read_json_mut(self.paths.ui_settings_path, default={}) or {}
             changed = False
+            # Force dark theme for now (theme switching is removed from UI).
+            if str(cur.get("theme") or "dark") != "dark":
+                cur["theme"] = "dark"
+                changed = True
             if "people_panel_open" not in cur:
                 cur["people_panel_open"] = True
                 changed = True
@@ -237,18 +241,18 @@ class Storage:
         # Stories + statuses (used by the "Stories" planner mode).
         if not self.paths.story_statuses_path.exists():
             seed_story_statuses = [
-                {"id": "story_not_started", "name": "Не начат", "color": "#9E9E9E", "locked": True, "default": True},
-                {"id": "story_writing", "name": "Пишется", "color": "#42A5F5", "locked": False},
-                {"id": "story_written_no_translation", "name": "Написан без перевода", "color": "#7E57C2", "locked": False},
-                {"id": "story_written", "name": "Написан", "color": "#5C6BC0", "locked": False},
-                {"id": "story_drawing", "name": "Рисуется", "color": "#26A69A", "locked": False},
-                {"id": "story_drawing_not_finished", "name": "Рисуется, не дописан", "color": "#FF1744", "locked": False},
-                {"id": "story_drawing_no_translation", "name": "Рисуется, нет перевода", "color": "#26A69A", "locked": False},
-                {"id": "story_ready", "name": "Готов", "color": "#66BB6A", "locked": False},
-                {"id": "story_ready_no_translation", "name": "Готов без перевода", "color": "#66BB6A", "locked": False},
-                {"id": "story_review", "name": "На проверке", "color": "#FFA726", "locked": False},
-                {"id": "story_delayed", "name": "Отложен", "color": "#BDBDBD", "locked": False},
-                {"id": "story_published", "name": "Опубликован", "color": "#FF7043", "locked": False},
+                {"id": "story_not_started", "name": "Не начат", "color": "#B0BEC5", "locked": True, "default": True},
+                {"id": "story_writing", "name": "Пишется", "color": "#FFCC80", "locked": False},
+                {"id": "story_written_no_translation", "name": "Написан без перевода", "color": "#90CAF9", "locked": False},
+                {"id": "story_written", "name": "Написан", "color": "#1E88E5", "locked": False},
+                {"id": "story_drawing", "name": "Рисуется", "color": "#FF8A80", "locked": False},
+                {"id": "story_drawing_not_finished", "name": "Рисуется, не дописан", "color": "#B71C1C", "locked": False},
+                {"id": "story_drawing_no_translation", "name": "Рисуется, нет перевода", "color": "#B39DDB", "locked": False},
+                {"id": "story_ready", "name": "Готов", "color": "#43A047", "locked": False},
+                {"id": "story_ready_no_translation", "name": "Готов без перевода", "color": "#A5D6A7", "locked": False},
+                {"id": "story_review", "name": "На проверке", "color": "#8D6E63", "locked": False},
+                {"id": "story_delayed", "name": "Отложен", "color": "#9E9D24", "locked": False},
+                {"id": "story_published", "name": "Опубликован", "color": "#00CFAE", "locked": False},
             ]
             self._atomic_write_json(self.paths.story_statuses_path, {"statuses": seed_story_statuses})
         else:
@@ -293,18 +297,18 @@ class Storage:
                 by_id[st_id] = st
                 changed = True
 
-            _ensure("story_not_started", "Не начат", "#9E9E9E", locked=True, default=True)
-            _ensure("story_writing", "Пишется", "#42A5F5")
-            _ensure("story_written_no_translation", "Написан без перевода", "#7E57C2")
-            _ensure("story_written", "Написан", "#5C6BC0")
-            _ensure("story_drawing", "Рисуется", "#26A69A")
-            _ensure("story_drawing_not_finished", "Рисуется, не дописан", "#FF1744")
-            _ensure("story_drawing_no_translation", "Рисуется, нет перевода", "#26A69A")
-            _ensure("story_ready", "Готов", "#66BB6A")
-            _ensure("story_ready_no_translation", "Готов без перевода", "#66BB6A")
-            _ensure("story_review", "На проверке", "#FFA726")
-            _ensure("story_delayed", "Отложен", "#BDBDBD")
-            _ensure("story_published", "Опубликован", "#FF7043")
+            _ensure("story_not_started", "Не начат", "#B0BEC5", locked=True, default=True)
+            _ensure("story_writing", "Пишется", "#FFCC80")
+            _ensure("story_written_no_translation", "Написан без перевода", "#90CAF9")
+            _ensure("story_written", "Написан", "#1E88E5")
+            _ensure("story_drawing", "Рисуется", "#FF8A80")
+            _ensure("story_drawing_not_finished", "Рисуется, не дописан", "#B71C1C")
+            _ensure("story_drawing_no_translation", "Рисуется, нет перевода", "#B39DDB")
+            _ensure("story_ready", "Готов", "#43A047")
+            _ensure("story_ready_no_translation", "Готов без перевода", "#A5D6A7")
+            _ensure("story_review", "На проверке", "#8D6E63")
+            _ensure("story_delayed", "Отложен", "#9E9D24")
+            _ensure("story_published", "Опубликован", "#00CFAE")
 
             if changed:
                 self._atomic_write_json(self.paths.story_statuses_path, cur)

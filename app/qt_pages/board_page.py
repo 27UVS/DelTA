@@ -765,6 +765,16 @@ class BoardPage(QWidget):
         # Used by task cards (id -> nickname). Include admin too.
         self._pending_subj_name = {_ADMIN_PERSON_ID: prof_name}
         self._pending_subj_name.update({str(s.get("id")): str(s.get("nickname")) for s in data["subjects"]})
+
+        # Story titles map for task cards ("linked story" label).
+        try:
+            self._story_title_by_id = {
+                str(st.get("id") or ""): str(st.get("title") or "")
+                for st in (self.storage.get_stories() or [])
+                if isinstance(st, dict) and str(st.get("id") or "")
+            }
+        except Exception:
+            self._story_title_by_id = {}
         for layout in self._columns.values():
             self._clear_layout_items(layout)
         self._pending_tasks.clear()
@@ -782,6 +792,14 @@ class BoardPage(QWidget):
         self._last_seen_storage_rev = self.storage.rev
         subjects = self.storage.get_subjects()
         self._pending_subj_name = {str(s.get("id")): str(s.get("nickname")) for s in subjects}
+        try:
+            self._story_title_by_id = {
+                str(st.get("id") or ""): str(st.get("title") or "")
+                for st in (self.storage.get_stories() or [])
+                if isinstance(st, dict) and str(st.get("id") or "")
+            }
+        except Exception:
+            self._story_title_by_id = {}
         for layout in self._columns.values():
             self._clear_layout_items(layout)
         self._pending_tasks.clear()
@@ -1637,7 +1655,7 @@ class BoardPage(QWidget):
 
         l.addLayout(row)
 
-        # Subtask progress: between assignees and time.
+        # Subtask progress: after assignees.
         # Do NOT gate on QWidget.isVisible() here — while the card is being built its
         # ancestors are not shown yet, so isVisible() is false and the strip would stay
         # a non-layout child of the card at (0,0), drawn on top of the title.
@@ -1652,7 +1670,23 @@ class BoardPage(QWidget):
             sh_l.addWidget(sub_strip)
             l.addWidget(strip_holder)
 
-        # Time label (wekan-like)
+        # Linked story label (if any): after subtasks (if any) and before time.
+        story_id = str(task.get("story_id") or "").strip()
+        if story_id:
+            st_title = ""
+            try:
+                st_title = str(getattr(self, "_story_title_by_id", {}).get(story_id, "") or "").strip()
+            except Exception:
+                st_title = ""
+            if st_title:
+                linked = QLabel(f"Привязанная история: {st_title}")
+            else:
+                linked = QLabel("Привязанная история: —")
+            linked.setWordWrap(True)
+            linked.setStyleSheet(f"color:{p.muted_fg}; background: transparent;")
+            l.addWidget(linked)
+
+        # Time label (wekan-like): always last.
         recurring = bool(task.get("recurring", False)) or (not task.get("start_due") and not task.get("end_due"))
         no_deadline = bool(task.get("no_deadline", False))
         start_due = str(task.get("start_due") or "").strip() or None
@@ -1831,6 +1865,10 @@ class BoardPage(QWidget):
         self._sync_columns_visibility_ui()
         # Rebuild people panel counts for tasks mode.
         self._refresh_people_after_filter_change()
+        # If stories were edited while in Stories mode, rebuild task cards so linked story titles refresh.
+        if bool(getattr(self, "_stories_dirty_for_tasks", False)):
+            self._stories_dirty_for_tasks = False
+            self._refresh_tasks_after_filter_change()
 
     def _compute_people_counter(self, subject_id: str) -> int:
         """
@@ -1868,10 +1906,27 @@ class BoardPage(QWidget):
         return int(cnt)
 
     def _on_stories_changed(self) -> None:
-        # If we're on the Stories page, update people panel counters immediately.
-        if str(self._people_counter_mode) != "stories":
+        # Stories affect:
+        # - people counters in stories mode
+        # - task cards (linked story title) in tasks mode
+        try:
+            self._story_title_by_id = {
+                str(st.get("id") or ""): str(st.get("title") or "")
+                for st in (self.storage.get_stories() or [])
+                if isinstance(st, dict) and str(st.get("id") or "")
+            }
+        except Exception:
+            self._story_title_by_id = {}
+
+        if str(self._people_counter_mode) == "stories":
+            # Story title changes should reflect on task cards after switching back to columns.
+            self._stories_dirty_for_tasks = True
+            self._refresh_people_after_filter_change()
             return
-        self._refresh_people_after_filter_change()
+
+        # Tasks columns are visible -> rebuild cards so linked story label updates immediately.
+        if bool(getattr(self, "_columns_visible", True)):
+            self._refresh_tasks_after_filter_change()
 
     def _sync_columns_visibility_ui(self) -> None:
         if not self._stories_enabled:

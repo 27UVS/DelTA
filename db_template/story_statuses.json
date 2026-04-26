@@ -3,74 +3,74 @@
     {
       "id": "story_not_started",
       "name": "Не начат",
-      "color": "#9E9E9E",
+      "color": "#B0BEC5",
       "locked": true,
       "default": true
     },
     {
       "id": "story_writing",
       "name": "Пишется",
-      "color": "#42A5F5",
+      "color": "#FFCC80",
       "locked": false
     },
     {
       "id": "story_written_no_translation",
       "name": "Написан без перевода",
-      "color": "#7E57C2",
+      "color": "#90CAF9",
       "locked": false
     },
     {
       "id": "story_written",
       "name": "Написан",
-      "color": "#5C6BC0",
+      "color": "#1E88E5",
       "locked": false
     },
     {
       "id": "story_drawing",
       "name": "Рисуется",
-      "color": "#26A69A",
+      "color": "#FF8A80",
       "locked": false
     },
     {
       "id": "story_drawing_not_finished",
       "name": "Рисуется, не дописан",
-      "color": "#FF1744",
+      "color": "#B71C1C",
       "locked": false
     },
     {
       "id": "story_drawing_no_translation",
       "name": "Рисуется, нет перевода",
-      "color": "#26A69A",
+      "color": "#B39DDB",
       "locked": false
     },
     {
       "id": "story_ready",
       "name": "Готов",
-      "color": "#66BB6A",
+      "color": "#43A047",
       "locked": false
     },
     {
       "id": "story_ready_no_translation",
       "name": "Готов без перевода",
-      "color": "#66BB6A",
+      "color": "#A5D6A7",
       "locked": false
     },
     {
       "id": "story_review",
       "name": "На проверке",
-      "color": "#FFA726",
+      "color": "#8D6E63",
       "locked": false
     },
     {
       "id": "story_delayed",
       "name": "Отложен",
-      "color": "#BDBDBD",
+      "color": "#9E9D24",
       "locked": false
     },
     {
       "id": "story_published",
       "name": "Опубликован",
-      "color": "#FF7043",
+      "color": "#00CFAE",
       "locked": false
     }
   ]
