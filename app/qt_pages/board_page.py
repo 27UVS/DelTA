@@ -40,6 +40,7 @@ from PySide6.QtWidgets import (
     QStackedWidget,
 )
 
+from app.duration_display import format_approx_ymd
 from app.assets import get_interface_assets
 from app.board_prefetch import TASK_KINDS, BoardPrefetchThread
 from app.qt_icon_loader import QtIconLoader
@@ -104,6 +105,7 @@ class _TaskCard(QFrame):
         self._from_kind = str(from_kind)
         self._drag_start: QPoint | None = None
         self._on_open = on_open
+        self._time_label: QLabel | None = None
 
     def mousePressEvent(self, event) -> None:  # type: ignore[override]
         super().mousePressEvent(event)
@@ -396,6 +398,10 @@ class BoardPage(QWidget):
         self._bg_resize_timer.setSingleShot(True)
         self._bg_resize_timer.setInterval(80)
         self._bg_resize_timer.timeout.connect(self._apply_background)
+        self._task_time_timer = QTimer(self)
+        self._task_time_timer.setInterval(60_000)
+        self._task_time_timer.timeout.connect(self._refresh_task_card_times)
+        self._task_time_timer.start()
         self._column_bodies: list[_ColumnBody] = []
         self._person_avatar_by_id: dict[str, str | None] = {}
         self._person_name_by_id: dict[str, str] = {}
@@ -487,9 +493,9 @@ class BoardPage(QWidget):
 
         top = QHBoxLayout()
         top.setContentsMargins(14, 12, 14, 0)
-        title = QLabel("Доска задач")
-        title.setObjectName("H1")
-        top.addWidget(title)
+        self._board_title = QLabel("Доска задач")
+        self._board_title.setObjectName("H1")
+        top.addWidget(self._board_title)
         top.addStretch(1)
         if self._stories_enabled:
             self.home_btn = QPushButton("")
@@ -1591,6 +1597,73 @@ class BoardPage(QWidget):
             if w is not None:
                 w.deleteLater()
 
+    def _parse_task_datetime(self, s: str | None) -> datetime | None:
+        if not s or not str(s).strip():
+            return None
+        try:
+            dt = datetime.fromisoformat(str(s).strip())
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=APP_TZ)
+            return dt.astimezone(APP_TZ)
+        except Exception:
+            return None
+
+    def _task_time_text_and_style(self, kind: str, task: dict, *, p: Palette) -> tuple[str, str]:
+        now = datetime.now(APP_TZ)
+        if kind == "finished":
+            return ("Завершено", f"color:{p.muted_fg}; background: transparent;")
+        recurring = bool(task.get("recurring", False)) or (not task.get("start_due") and not task.get("end_due"))
+        if recurring:
+            return ("Постоянное", "font-weight:800; background: transparent;")
+        no_deadline = bool(task.get("no_deadline", False))
+        start_due = str(task.get("start_due") or "").strip() or None
+        end_due = str(task.get("end_due") or "").strip() or None
+        sd = self._parse_task_datetime(start_due) if start_due else None
+        ed = self._parse_task_datetime(end_due) if (end_due and not no_deadline) else None
+        if sd and ed:
+            delta_days = (ed - now).total_seconds() / 86400.0
+            if delta_days >= 0:
+                x = int(math.ceil(delta_days))
+                return (f"осталось {format_approx_ymd(x)}", "color:#4CAF50; background: transparent; font-weight:700;")
+            x = int(math.ceil(abs(delta_days)))
+            return (f"просрочено на {format_approx_ymd(x)}", "color:#EF5350; background: transparent; font-weight:700;")
+        if sd:
+            delta = (now - sd).total_seconds() / 86400.0
+            x = int(max(0, math.floor(delta)))
+            return (format_approx_ymd(x), f"color:{p.muted_fg}; background: transparent;")
+        return ("Постоянное", "font-weight:800; background: transparent;")
+
+    def _refresh_task_card_times(self) -> None:
+        """Перерасчёт подписей времени на карточках без перезагрузки JSON из диска."""
+        if not self.isVisible():
+            return
+        if not bool(getattr(self, "_columns_visible", True)):
+            return
+        if hasattr(self, "main_stack") and self.main_stack.currentWidget() is not getattr(
+            self, "columns_inner", None
+        ):
+            return
+        theme = self.storage.get_ui_settings().get("theme", "dark")
+        p = get_palette(theme)
+        for kind, layout in self._columns.items():
+            by_id = {str(t.get("id")): t for t in self.storage.load_tasks(kind)}
+            for i in range(layout.count()):
+                it = layout.itemAt(i)
+                w = it.widget() if it is not None else None
+                if not isinstance(w, _TaskCard):
+                    continue
+                tl = w._time_label
+                if tl is None:
+                    continue
+                task = by_id.get(w._task_id)
+                if task is None:
+                    continue
+                text, style = self._task_time_text_and_style(kind, task, p=p)
+                if tl.text() != text:
+                    tl.setText(text)
+                if tl.styleSheet() != style:
+                    tl.setStyleSheet(style)
+
     def _task_card(self, kind: str, task: dict, subj_name: dict[str, str]) -> QWidget:
         theme = self.storage.get_ui_settings().get("theme", "dark")
         p = get_palette(theme)
@@ -1687,48 +1760,11 @@ class BoardPage(QWidget):
             l.addWidget(linked)
 
         # Time label (wekan-like): always last.
-        recurring = bool(task.get("recurring", False)) or (not task.get("start_due") and not task.get("end_due"))
-        no_deadline = bool(task.get("no_deadline", False))
-        start_due = str(task.get("start_due") or "").strip() or None
-        end_due = str(task.get("end_due") or "").strip() or None
-
-        def _parse_iso(s: str) -> datetime | None:
-            try:
-                dt = datetime.fromisoformat(s)
-                if dt.tzinfo is None:
-                    dt = dt.replace(tzinfo=APP_TZ)
-                return dt.astimezone(APP_TZ)
-            except Exception:
-                return None
-
-        now = datetime.now(APP_TZ)
-        if kind == "finished":
-            d = QLabel("Завершено")
-            d.setStyleSheet(f"color:{p.muted_fg}; background: transparent;")
-        elif recurring:
-            d = QLabel("Постоянное")
-            d.setStyleSheet("font-weight:800; background: transparent;")
-        else:
-            sd = _parse_iso(start_due) if start_due else None
-            ed = _parse_iso(end_due) if (end_due and not no_deadline) else None
-            if sd and ed:
-                delta_days = (ed - now).total_seconds() / 86400.0
-                if delta_days >= 0:
-                    x = int(math.ceil(delta_days))
-                    d = QLabel(f"осталось {x} дн.")
-                    d.setStyleSheet("color:#4CAF50; background: transparent; font-weight:700;")
-                else:
-                    x = int(math.ceil(abs(delta_days)))
-                    d = QLabel(f"просрочено на {x} дн.")
-                    d.setStyleSheet("color:#EF5350; background: transparent; font-weight:700;")
-            elif sd:
-                delta = (now - sd).total_seconds() / 86400.0
-                x = int(max(0, math.floor(delta)))
-                d = QLabel(f"{x} дн.")
-                d.setStyleSheet(f"color:{p.muted_fg}; background: transparent;")
-            else:
-                d = QLabel("Постоянное")
-                d.setStyleSheet("font-weight:800; background: transparent;")
+        txt, sty = self._task_time_text_and_style(kind, task, p=p)
+        d = QLabel(txt)
+        d.setStyleSheet(sty)
+        d.setObjectName("TaskCardTime")
+        card._time_label = d
 
         d.setWordWrap(True)
         l.addWidget(d)
@@ -1844,6 +1880,8 @@ class BoardPage(QWidget):
             return
         self._columns_visible = False
         self._people_counter_mode = "stories"
+        if hasattr(self, "_board_title") and self._board_title is not None:
+            self._board_title.setText("Доска историй")
         # Ensure we show the latest roles/taxonomy after admin changes.
         try:
             self.stories_page.reload_from_storage()
@@ -1861,8 +1899,11 @@ class BoardPage(QWidget):
             return
         self._columns_visible = True
         self._people_counter_mode = "tasks"
+        if hasattr(self, "_board_title") and self._board_title is not None:
+            self._board_title.setText("Доска задач")
         self.main_stack.setCurrentWidget(self.columns_inner)
         self._sync_columns_visibility_ui()
+        QTimer.singleShot(0, self._refresh_task_card_times)
         # Rebuild people panel counts for tasks mode.
         self._refresh_people_after_filter_change()
         # If stories were edited while in Stories mode, rebuild task cards so linked story titles refresh.
@@ -1974,6 +2015,7 @@ class BoardPage(QWidget):
 
     def cleanup_threads(self) -> None:
         """Wait for worker threads before shutdown (avoids 'QThread destroyed while still running')."""
+        self._task_time_timer.stop()
         self._bg_resize_timer.stop()
         if self._bg_loader is not None:
             try:

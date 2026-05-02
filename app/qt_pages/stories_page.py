@@ -42,6 +42,11 @@ _RE_STYLE_BG = re.compile(r"background(?:-color)?\s*:\s*[^;\"']+;?", re.IGNORECA
 _RE_BG_COLOR_ATTR = re.compile(r'\sbgcolor\s*=\s*(?:"[^"]*"|\'[^\']*\'|[^\s>]+)', re.IGNORECASE)
 _RE_STYLE_COLOR = re.compile(r"color\s*:\s*[^;\"']+;?", re.IGNORECASE)
 _RE_COLOR_ATTR = re.compile(r'\scolor\s*=\s*(?:"[^"]*"|\'[^\']*\'|[^\s>]+)', re.IGNORECASE)
+_RE_STYLE_FONT = re.compile(
+    r"(?:font-size|font-family|font-stretch|font-variant|font|line-height)\s*:\s*[^;\"']+;?",
+    re.IGNORECASE,
+)
+_RE_FONT_ATTR = re.compile(r'\s(?:size|face)\s*=\s*(?:"[^"]*"|\'[^\']*\'|[^\s>]+)', re.IGNORECASE)
 
 
 def _strip_background_html(html: str) -> str:
@@ -71,10 +76,12 @@ def _sanitize_rich_html_for_dark(html: str) -> str:
     if not s:
         return s
     s = _RE_COLOR_ATTR.sub("", s)
+    s = _RE_FONT_ATTR.sub("", s)
 
     def _fix_style_color(m):
         val = m.group(0)
         cleaned = _RE_STYLE_COLOR.sub("", val)
+        cleaned = _RE_STYLE_FONT.sub("", cleaned)
         return cleaned
 
     s = re.sub(r'style\s*=\s*"[^"]*"', _fix_style_color, s, flags=re.IGNORECASE)

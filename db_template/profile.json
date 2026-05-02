@@ -2,6 +2,8 @@
   "nickname": "Администратор",
   "avatar_path": null,
   "experimental_mode": false,
+  "full_shutdown": true,
+  "task_notify_interval_days": 7,
   "links": {
     "youtube": "",
     "instagram": "",

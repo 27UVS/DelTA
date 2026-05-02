@@ -184,6 +184,8 @@ class Storage:
                 "nickname": "Администратор",
                 "avatar_path": None,
                 "experimental_mode": False,
+                "full_shutdown": True,
+                "task_notify_interval_days": 7,
                 "links": {
                     "youtube": "",
                     "instagram": "",
@@ -202,6 +204,12 @@ class Storage:
             changed = False
             if "experimental_mode" not in cur:
                 cur["experimental_mode"] = False
+                changed = True
+            if "full_shutdown" not in cur:
+                cur["full_shutdown"] = True
+                changed = True
+            if "task_notify_interval_days" not in cur:
+                cur["task_notify_interval_days"] = 7
                 changed = True
             if changed:
                 self._atomic_write_json(self.paths.profile_path, cur)

@@ -24,6 +24,7 @@ from PySide6.QtWidgets import (
     QFrame,
     QSizePolicy,
     QApplication,
+    QSpinBox,
 )
 
 from app.storage import Storage, SYSTEM_ADMIN_ROLE_ID, SYSTEM_NONE_ROLE_ID
@@ -144,6 +145,50 @@ class ProfilePage(QWidget):
         exp_row.addWidget(self.experimental_switch, 0, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         # Align with the left edge of the "Другие ссылки/контакты" input itself.
         fields.addLayout(exp_row)
+
+        full_off_row = QHBoxLayout()
+        full_off_row.setContentsMargins(0, 0, 0, 0)
+        full_off_row.setSpacing(10)
+        full_off_lbl = QLabel("Полное отключение")
+        full_off_lbl.setAlignment(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft)
+        self.full_shutdown_switch = _ToggleSwitch()
+        self.full_shutdown_switch.blockSignals(True)
+        self.full_shutdown_switch.setChecked(True)
+        self.full_shutdown_switch.blockSignals(False)
+        self.full_shutdown_switch.toggled.connect(self._on_full_shutdown_toggled)
+        full_off_row.addWidget(full_off_lbl, 0, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        full_off_row.addStretch(1)
+        full_off_row.addWidget(self.full_shutdown_switch, 0, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        fields.addLayout(full_off_row)
+
+        self._notify_section = QWidget()
+        ns_l = QVBoxLayout(self._notify_section)
+        ns_l.setContentsMargins(0, 8, 0, 0)
+        ns_l.setSpacing(6)
+        ns_h = QLabel("Напоминания о заданиях «В процессе»")
+        ns_h.setObjectName("H2")
+        ns_l.addWidget(ns_h)
+        interval_row = QHBoxLayout()
+        interval_row.setSpacing(10)
+        interval_row.addWidget(QLabel("Интервал повторения:"), 0)
+        self.notify_interval_spin = QSpinBox()
+        self.notify_interval_spin.setRange(1, 30)
+        self.notify_interval_spin.setSuffix(" дн.")
+        self.notify_interval_spin.valueChanged.connect(self._on_notify_interval_changed)
+        interval_row.addWidget(self.notify_interval_spin, 0)
+        interval_row.addStretch(1)
+        ns_l.addLayout(interval_row)
+        ns_hint = QLabel(
+            "Пока «Полное отключение» выключено и программа работает (в том числе в фоне), "
+            "приходят уведомления Windows только по заданиям в столбце «В процессе». "
+            "Для заданий без дедлайна напоминания привязаны к дате из startline (или к дате создания, если нет startline); "
+            "для заданий с дедлайном сначала — в момент deadline, затем цикл от даты дедлайна."
+        )
+        ns_hint.setWordWrap(True)
+        ns_l.addWidget(ns_hint)
+        fields.addWidget(self._notify_section)
+        self._sync_notify_section_visibility()
+
         form_row.addLayout(fields, 1)
         inner_l.addLayout(form_row)
         profile_scroll.setWidget(profile_inner)
@@ -171,6 +216,26 @@ class ProfilePage(QWidget):
         actions.addWidget(self.save_btn)
         root.addLayout(actions)
 
+    def _sync_notify_section_visibility(self) -> None:
+        self._notify_section.setVisible(not self.full_shutdown_switch.isChecked())
+
+    def _sync_app_full_shutdown_flag(self) -> None:
+        app = QApplication.instance()
+        if app is not None:
+            setattr(app, "_delta_full_shutdown_ui", bool(self.full_shutdown_switch.isChecked()))
+
+    def _on_full_shutdown_toggled(self, checked: bool) -> None:
+        prof = self.storage.get_profile()
+        prof["full_shutdown"] = bool(checked)
+        self.storage.save_profile(prof)
+        self._sync_app_full_shutdown_flag()
+        self._sync_notify_section_visibility()
+
+    def _on_notify_interval_changed(self, value: int) -> None:
+        prof = self.storage.get_profile()
+        prof["task_notify_interval_days"] = max(1, min(30, int(value)))
+        self.storage.save_profile(prof)
+
     def showEvent(self, event: QShowEvent) -> None:
         super().showEvent(event)
         if not self._initial_load_done:
@@ -190,6 +255,16 @@ class ProfilePage(QWidget):
             edit.setText(str(links.get(key, "")))
         self.other_text.setPlainText(str(links.get("other", "")))
         self.experimental_switch.setChecked(bool(profile.get("experimental_mode", False)))
+        self.full_shutdown_switch.blockSignals(True)
+        self.full_shutdown_switch.setChecked(bool(profile.get("full_shutdown", True)))
+        self.full_shutdown_switch.blockSignals(False)
+        self._sync_app_full_shutdown_flag()
+        self._sync_notify_section_visibility()
+        niv = int(profile.get("task_notify_interval_days", 7) or 7)
+        niv = max(1, min(30, niv))
+        self.notify_interval_spin.blockSignals(True)
+        self.notify_interval_spin.setValue(niv)
+        self.notify_interval_spin.blockSignals(False)
 
         # Avatar
         avatar_path = profile.get("avatar_path")
@@ -275,6 +350,8 @@ class ProfilePage(QWidget):
 
         new_exp = bool(self.experimental_switch.isChecked())
         profile["experimental_mode"] = bool(new_exp)
+        profile["full_shutdown"] = bool(self.full_shutdown_switch.isChecked())
+        profile["task_notify_interval_days"] = max(1, min(30, int(self.notify_interval_spin.value())))
 
         self.storage.save_profile(profile)
         QMessageBox.information(self, "Готово", "Профиль сохранен.")
@@ -300,6 +377,8 @@ class ProfilePage(QWidget):
             pass
         try:
             if app is not None:
+                # Bypass "background/hide instead of quit" profile mode during restart.
+                setattr(app, "_delta_force_full_quit", True)
                 app.closeAllWindows()
                 app.processEvents()
         except Exception:

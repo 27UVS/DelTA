@@ -14,6 +14,7 @@ class AppPaths:
     statuses_path: Path
     subjects_path: Path
     profile_path: Path
+    task_notify_state_path: Path
     tasks_draft_path: Path
     tasks_progress_path: Path
     tasks_finished_path: Path
@@ -44,6 +45,7 @@ def get_app_paths() -> AppPaths:
         statuses_path=db_dir / "statuses.json",
         subjects_path=db_dir / "subjects.json",
         profile_path=db_dir / "profile.json",
+        task_notify_state_path=db_dir / "task_notify_state.json",
         tasks_draft_path=db_dir / "tasks_draft.json",
         tasks_progress_path=db_dir / "tasks_progress.json",
         tasks_finished_path=db_dir / "tasks_finished.json",

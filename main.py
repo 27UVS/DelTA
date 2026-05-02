@@ -4,6 +4,7 @@ from pathlib import Path
 import shutil
 import sys
 
+from app.win_notify_bridge import try_handle_notify_protocol_argv
 from app.qt_main_window import run_app
 
 
@@ -25,6 +26,7 @@ def ensure_db_exists() -> None:
 
 
 if __name__ == "__main__":
+    try_handle_notify_protocol_argv()
     ensure_db_exists()
     run_app()
 
