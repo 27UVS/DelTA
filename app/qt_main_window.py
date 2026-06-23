@@ -5,7 +5,7 @@ import os
 import sys
 
 from PySide6.QtCore import Qt, QTimer
-from PySide6.QtGui import QCloseEvent, QIcon
+from PySide6.QtGui import QCloseEvent, QIcon, QShowEvent
 from PySide6.QtNetwork import QLocalServer, QLocalSocket
 from PySide6.QtWidgets import QApplication, QMainWindow, QStackedWidget
 
@@ -43,6 +43,9 @@ def _raise_main_window(win: QMainWindow) -> None:
     win.show()
     win.raise_()
     win.activateWindow()
+    board = getattr(win, "board", None)
+    if board is not None and hasattr(board, "_refresh_task_card_times"):
+        QTimer.singleShot(0, board._refresh_task_card_times)
 
 
 def _on_activation_connected(server: QLocalServer, win: QMainWindow) -> None:
@@ -102,6 +105,11 @@ class MainWindow(QMainWindow):
         self._last_theme: str | None = None
         # Defer expensive work until after the event loop starts (window can paint first).
         QTimer.singleShot(0, self._post_show_init)
+
+    def showEvent(self, event: QShowEvent) -> None:  # type: ignore[override]
+        super().showEvent(event)
+        # Окно снова на экране (из фона, из трея, второй запуск) — сразу обновить время на карточках.
+        QTimer.singleShot(0, self.board._refresh_task_card_times)
 
     def _post_show_init(self) -> None:
         self.apply_theme(show_overlay=False)

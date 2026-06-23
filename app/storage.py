@@ -28,6 +28,14 @@ SYSTEM_ADMIN_ROLE_ID = "role_admin"
 SYSTEM_NONE_ROLE_ID = "role_none"
 
 SYSTEM_STATUS_NONE_ID = "status_none"
+
+STORY_KEY_OBJECT_KINDS = ("character", "place")
+STORY_KEY_OBJECT_DEFAULT_COLOR = "#FFFFFF"
+
+
+def _normalize_story_key_object_color(color: str | None) -> str:
+    c = str(color or "").strip()
+    return c if c else STORY_KEY_OBJECT_DEFAULT_COLOR
 SYSTEM_STATUS_AVAILABLE_ID = "status_available"
 SYSTEM_STATUS_BUSY_ID = "status_busy"
 SYSTEM_STATUS_ABSENT_ID = "status_absent"
@@ -222,6 +230,8 @@ class Storage:
                 # Main page UI:
                 "people_panel_open": True,
                 "people_panel_pinned": False,
+                "stories_filter_in_seasons": True,
+                "stories_filter_outside_seasons": True,
             }
             self._atomic_write_json(self.paths.ui_settings_path, seed_ui_settings)
         else:
@@ -237,6 +247,12 @@ class Storage:
                 changed = True
             if "people_panel_pinned" not in cur:
                 cur["people_panel_pinned"] = False
+                changed = True
+            if "stories_filter_in_seasons" not in cur:
+                cur["stories_filter_in_seasons"] = True
+                changed = True
+            if "stories_filter_outside_seasons" not in cur:
+                cur["stories_filter_outside_seasons"] = True
                 changed = True
             if changed:
                 self._atomic_write_json(self.paths.ui_settings_path, cur)
@@ -331,6 +347,23 @@ class Storage:
                 {"id": "section_not_actual", "name": "Не актуальные", "kind": "section", "locked": True},
             ]
             self._atomic_write_json(self.paths.story_taxonomy_path, {"items": seed})
+        else:
+            cur = self._read_json_mut(self.paths.story_taxonomy_path, default={"items": []}) or {"items": []}
+            items = cur.get("items", [])
+            changed = False
+            if isinstance(items, list):
+                for it in items:
+                    if not isinstance(it, dict):
+                        continue
+                    if str(it.get("kind") or "") not in STORY_KEY_OBJECT_KINDS:
+                        continue
+                    if str(it.get("color") or "").strip():
+                        continue
+                    it["color"] = STORY_KEY_OBJECT_DEFAULT_COLOR
+                    changed = True
+            if changed:
+                cur["items"] = items
+                self._atomic_write_json(self.paths.story_taxonomy_path, cur)
 
     # ----------- Stories (planner) -----------
     def get_story_statuses(self) -> list[dict[str, Any]]:
@@ -373,6 +406,10 @@ class Storage:
             story["arc_id"] = str(story.get("arc_id") or "arc_all")
         else:
             story["arc_id"] = "arc_all"
+        if "key_object_id" in story:
+            story["key_object_id"] = str(story.get("key_object_id") or "").strip()
+        else:
+            story["key_object_id"] = ""
         sec_ids = story.get("section_ids", [])
         if not isinstance(sec_ids, list):
             sec_ids = []
@@ -427,6 +464,8 @@ class Storage:
                 merged["season_id"] = str(merged.get("season_id") or "season_all")
             if "arc_id" in merged:
                 merged["arc_id"] = str(merged.get("arc_id") or "arc_all")
+            if "key_object_id" in merged:
+                merged["key_object_id"] = str(merged.get("key_object_id") or "").strip()
             if "section_ids" in merged:
                 sec_ids = merged.get("section_ids")
                 if not isinstance(sec_ids, list):
@@ -804,22 +843,24 @@ class Storage:
     def save_story_taxonomy(self, items: list[dict[str, Any]]) -> None:
         self._atomic_write_json(self.paths.story_taxonomy_path, {"items": items})
 
-    def add_story_taxonomy_item(self, *, name: str, kind: str) -> dict[str, Any]:
+    def add_story_taxonomy_item(self, *, name: str, kind: str, color: str | None = None) -> dict[str, Any]:
         name = str(name or "").strip()
         kind = str(kind or "").strip()
         if not name:
             raise ValueError("Название пустое")
-        if kind not in ("season", "arc", "section"):
+        if kind not in ("season", "arc", "section", "character", "place"):
             raise ValueError("Некорректный тип")
         items = self.get_story_taxonomy()
         if any(str(x.get("kind")) == kind and str(x.get("name")).strip().lower() == name.lower() for x in items):
             raise ValueError("Элемент с таким названием уже существует")
-        row = {"id": str(uuid.uuid4()), "name": name, "kind": kind, "locked": False}
+        row: dict[str, Any] = {"id": str(uuid.uuid4()), "name": name, "kind": kind, "locked": False}
+        if kind in STORY_KEY_OBJECT_KINDS:
+            row["color"] = _normalize_story_key_object_color(color)
         items.append(row)
         self.save_story_taxonomy(items)
         return copy.deepcopy(row)
 
-    def update_story_taxonomy_item(self, item_id: str, *, name: str) -> dict[str, Any]:
+    def update_story_taxonomy_item(self, item_id: str, *, name: str, color: str | None = None) -> dict[str, Any]:
         item_id = str(item_id or "")
         if not item_id:
             raise ValueError("id пустой")
@@ -837,6 +878,11 @@ class Storage:
                 raise ValueError("Элемент с таким названием уже существует")
             it2 = copy.deepcopy(it)
             it2["name"] = name
+            if kind in STORY_KEY_OBJECT_KINDS:
+                if color is not None:
+                    it2["color"] = _normalize_story_key_object_color(color)
+                elif not str(it2.get("color") or "").strip():
+                    it2["color"] = STORY_KEY_OBJECT_DEFAULT_COLOR
             items[i] = it2
             self.save_story_taxonomy(items)
             return copy.deepcopy(it2)

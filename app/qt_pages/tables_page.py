@@ -38,6 +38,8 @@ from app.storage import (
     SYSTEM_ADMIN_ROLE_ID,
     SYSTEM_NONE_ROLE_ID,
     SYSTEM_STATUS_NONE_ID,
+    STORY_KEY_OBJECT_DEFAULT_COLOR,
+    STORY_KEY_OBJECT_KINDS,
 )
 
 _ADMIN_PERSON_ID = "__admin__"
@@ -255,6 +257,87 @@ class StatusDialog(QDialog):
 
     def payload(self) -> tuple[str, str]:
         return self.name_edit.text(), self.color_edit.text()
+
+
+class StoryTaxonomyItemDialog(QDialog):
+    def __init__(self, parent: QWidget, *, item: dict | None = None):
+        super().__init__(parent)
+        self._item = item if isinstance(item, dict) else None
+        self._is_add = self._item is None
+        self.setWindowTitle("Добавить элемент сюжета" if self._is_add else "Редактировать")
+        self.setModal(True)
+        self._icons = QtIconLoader()
+        self._assets = get_interface_assets()
+
+        root = QVBoxLayout(self)
+        self.name_edit = QLineEdit(str((self._item or {}).get("name", "")))
+        root.addWidget(QLabel("Название"))
+        root.addWidget(self.name_edit)
+
+        self.kind_cb: QComboBox | None = None
+        if self._is_add:
+            self.kind_cb = QComboBox()
+            self.kind_cb.addItem("Сезон", "season")
+            self.kind_cb.addItem("Арка", "arc")
+            self.kind_cb.addItem("Раздел", "section")
+            self.kind_cb.addItem("Персонаж", "character")
+            self.kind_cb.addItem("Место", "place")
+            root.addWidget(QLabel("Тип"))
+            root.addWidget(self.kind_cb)
+            self.kind_cb.currentIndexChanged.connect(self._sync_color_visibility)
+
+        self._color_label = QLabel("Цвет (HEX)")
+        self.color_edit = QLineEdit(
+            str((self._item or {}).get("color") or STORY_KEY_OBJECT_DEFAULT_COLOR)
+        )
+        self.pick_color_btn = QPushButton("")
+        self.pick_color_btn.setToolTip("Выбрать цвет")
+        pm = self._icons.load_pixmap(self._assets.color_button_png, (18, 18))
+        if pm is not None:
+            self.pick_color_btn.setIcon(QIcon(pm))
+        self.pick_color_btn.setFixedSize(34, 28)
+        self.pick_color_btn.setIconSize(QSize(18, 18))
+        self.pick_color_btn.clicked.connect(self._choose_color)
+        self._color_row = QHBoxLayout()
+        self._color_row.addWidget(self._color_label, 0)
+        self._color_row.addWidget(self.color_edit, 0)
+        self._color_row.addWidget(self.pick_color_btn, 0)
+        self._color_row.addStretch(1)
+        root.addLayout(self._color_row)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Cancel | QDialogButtonBox.StandardButton.Save)
+        buttons.rejected.connect(self.reject)
+        buttons.accepted.connect(self.accept)
+        root.addWidget(buttons)
+
+        self._sync_color_visibility()
+
+    def _current_kind(self) -> str:
+        if self._is_add and self.kind_cb is not None:
+            return str(self.kind_cb.currentData() or "")
+        return str((self._item or {}).get("kind") or "")
+
+    def _sync_color_visibility(self) -> None:
+        visible = self._current_kind() in STORY_KEY_OBJECT_KINDS
+        self._color_label.setVisible(visible)
+        self.color_edit.setVisible(visible)
+        self.pick_color_btn.setVisible(visible)
+
+    def _choose_color(self) -> None:
+        c = QColorDialog.getColor()
+        if not c.isValid():
+            return
+        self.color_edit.setText(c.name())
+
+    def payload(self) -> dict[str, str | None]:
+        out: dict[str, str | None] = {"name": self.name_edit.text()}
+        if self._is_add:
+            out["kind"] = self._current_kind()
+        if self._current_kind() in STORY_KEY_OBJECT_KINDS:
+            out["color"] = self.color_edit.text()
+        else:
+            out["color"] = None
+        return out
 
 
 class SubjectDialog(QDialog):
@@ -845,7 +928,7 @@ class TablesPage(QWidget):
     def refresh_story_taxonomy(self) -> None:
         items = self.storage.get_story_taxonomy()
         # order: seasons, arcs, sections; locked first inside each group
-        kind_order = {"season": 0, "arc": 1, "section": 2}
+        kind_order = {"season": 0, "arc": 1, "section": 2, "character": 3, "place": 4}
         def _k(x: dict) -> tuple[int, int, str]:
             k = str(x.get("kind") or "")
             locked = 0 if bool(x.get("locked")) else 1
@@ -853,7 +936,7 @@ class TablesPage(QWidget):
         items = sorted(items, key=_k)
         self._story_row_id: list[str] = []
         self.story_table.setRowCount(len(items))
-        kind_label = {"season": "Сезон", "arc": "Арка", "section": "Раздел"}
+        kind_label = {"season": "Сезон", "arc": "Арка", "section": "Раздел", "character": "Персонаж", "place": "Место"}
         for i, it in enumerate(items):
             self._story_row_id.append(str(it.get("id") or ""))
             name = str(it.get("name") or "")
@@ -874,27 +957,16 @@ class TablesPage(QWidget):
         return str(self._story_row_id[row])
 
     def _on_add_story_tax_item(self) -> None:
-        dlg = QDialog(self)
-        dlg.setWindowTitle("Добавить элемент сюжета")
-        dlg.setModal(True)
-        lay = QVBoxLayout(dlg)
-        name_edit = QLineEdit()
-        kind_cb = QComboBox()
-        kind_cb.addItem("Сезон", "season")
-        kind_cb.addItem("Арка", "arc")
-        kind_cb.addItem("Раздел", "section")
-        lay.addWidget(QLabel("Название"))
-        lay.addWidget(name_edit)
-        lay.addWidget(QLabel("Тип"))
-        lay.addWidget(kind_cb)
-        btns = QDialogButtonBox(QDialogButtonBox.StandardButton.Cancel | QDialogButtonBox.StandardButton.Save)
-        btns.rejected.connect(dlg.reject)
-        btns.accepted.connect(dlg.accept)
-        lay.addWidget(btns)
+        dlg = StoryTaxonomyItemDialog(self)
         if dlg.exec() != QDialog.DialogCode.Accepted:
             return
+        data = dlg.payload()
         try:
-            self.storage.add_story_taxonomy_item(name=name_edit.text(), kind=str(kind_cb.currentData() or ""))
+            self.storage.add_story_taxonomy_item(
+                name=str(data.get("name") or ""),
+                kind=str(data.get("kind") or ""),
+                color=data.get("color"),
+            )
             self.refresh_all()
         except Exception as e:
             QMessageBox.critical(self, "Ошибка", str(e))
@@ -911,21 +983,16 @@ class TablesPage(QWidget):
         if bool(cur.get("locked", False)):
             QMessageBox.warning(self, "Запрещено", "Этот элемент нельзя редактировать.")
             return
-        dlg = QDialog(self)
-        dlg.setWindowTitle("Редактировать")
-        dlg.setModal(True)
-        lay = QVBoxLayout(dlg)
-        name_edit = QLineEdit(str(cur.get("name") or ""))
-        lay.addWidget(QLabel("Название"))
-        lay.addWidget(name_edit)
-        btns = QDialogButtonBox(QDialogButtonBox.StandardButton.Cancel | QDialogButtonBox.StandardButton.Save)
-        btns.rejected.connect(dlg.reject)
-        btns.accepted.connect(dlg.accept)
-        lay.addWidget(btns)
+        dlg = StoryTaxonomyItemDialog(self, item=cur)
         if dlg.exec() != QDialog.DialogCode.Accepted:
             return
+        data = dlg.payload()
         try:
-            self.storage.update_story_taxonomy_item(tid, name=name_edit.text())
+            self.storage.update_story_taxonomy_item(
+                tid,
+                name=str(data.get("name") or ""),
+                color=data.get("color"),
+            )
             self.refresh_all()
         except Exception as e:
             QMessageBox.critical(self, "Ошибка", str(e))

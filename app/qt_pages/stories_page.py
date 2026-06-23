@@ -30,12 +30,39 @@ from PySide6.QtWidgets import (
 )
 
 from app.assets import get_interface_assets
-from app.storage import Storage, SYSTEM_NONE_ROLE_ID
+from app.storage import Storage, SYSTEM_NONE_ROLE_ID, STORY_KEY_OBJECT_DEFAULT_COLOR
 from app.qt_widgets.flow_layout import FlowLayout
 
 
 def _norm(s: str) -> str:
     return re.sub(r"\s+", " ", str(s or "")).strip().lower()
+
+
+_OUTSIDE_SEASONS_SECTION_NAME = "вне сезонов"
+_KEY_OBJECT_KINDS = ("character", "place")
+_KEY_OBJECT_KIND_LABEL = {"character": "Персонаж", "place": "Место"}
+
+
+def _is_outside_seasons_section(sec: dict[str, Any]) -> bool:
+    return _norm(str(sec.get("name") or "")) == _OUTSIDE_SEASONS_SECTION_NAME
+
+
+def _key_object_display_name(obj: dict[str, Any]) -> str:
+    name = str(obj.get("name") or "—")
+    kind = str(obj.get("kind") or "")
+    kind_txt = _KEY_OBJECT_KIND_LABEL.get(kind, "")
+    return f"{name} ({kind_txt})" if kind_txt else name
+
+
+def _html_escape_text(text: str) -> str:
+    return (
+        str(text or "")
+        .replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+        .replace('"', "&quot;")
+        .replace("'", "&#39;")
+    )
 
 
 _RE_STYLE_BG = re.compile(r"background(?:-color)?\s*:\s*[^;\"']+;?", re.IGNORECASE)
@@ -133,6 +160,7 @@ class StoriesPage(QWidget):
         self._editing: bool = False
         self._draft: dict[str, Any] | None = None
         self._all_sections: list[dict[str, Any]] = []
+        self._all_key_objects: list[dict[str, Any]] = []
         self._last_sort_mode: str = "personal"
 
         root = QHBoxLayout(self)
@@ -152,6 +180,10 @@ class StoriesPage(QWidget):
         self.season_cb.setToolTip("Сезон (фильтр)")
         self.arc_cb = QComboBox()
         self.arc_cb.setToolTip("Арка (фильтр)")
+        self.key_objects_filter = QListWidget()
+        self.key_objects_filter.setSelectionMode(QListWidget.SelectionMode.NoSelection)
+        self.key_objects_filter.setMaximumHeight(220)
+        self.key_objects_filter.setToolTip("Фильтр по ключевым объектам (персонажи и места)")
         self.show_archived_cb = QCheckBox("Показывать не актуальные (архив)")
         self.sections_filter = QListWidget()
         self.sections_filter.setSelectionMode(QListWidget.SelectionMode.NoSelection)
@@ -173,7 +205,17 @@ class StoriesPage(QWidget):
         left_l.addWidget(self.season_cb)
         left_l.addWidget(QLabel("Арка"))
         left_l.addWidget(self.arc_cb)
+        left_l.addWidget(QLabel("Ключевой объект"))
+        left_l.addWidget(self.key_objects_filter)
         left_l.addWidget(QLabel("Раздел"))
+        self.sections_in_seasons_cb = QCheckBox("В сезонах")
+        self.sections_in_seasons_cb.setChecked(True)
+        self.sections_in_seasons_cb.setToolTip("Показывать истории без отметки раздела «Вне сезонов»")
+        self.sections_outside_seasons_cb = QCheckBox("Вне сезонов")
+        self.sections_outside_seasons_cb.setChecked(True)
+        self.sections_outside_seasons_cb.setToolTip("Показывать истории с отметкой раздела «Вне сезонов»")
+        left_l.addWidget(self.sections_in_seasons_cb)
+        left_l.addWidget(self.sections_outside_seasons_cb)
         left_l.addWidget(self.sections_filter)
         left_l.addWidget(QLabel("Порядок"))
         left_l.addWidget(self.sort_cb)
@@ -230,6 +272,8 @@ class StoriesPage(QWidget):
         # Story classification (season/arc + sections multi-select)
         self.story_season_cb = QComboBox()
         self.story_arc_cb = QComboBox()
+        self.story_key_object_cb = QComboBox()
+        self.story_key_object_cb.setToolTip("Персонаж или место, связанные с историей")
         self.story_sections_list = QListWidget()
         self.story_sections_list.setSelectionMode(QListWidget.SelectionMode.NoSelection)
         self.story_sections_list.setMaximumHeight(170)
@@ -240,8 +284,10 @@ class StoriesPage(QWidget):
         class_l.addWidget(self.story_season_cb, 0, 1)
         class_l.addWidget(QLabel("Арка"), 1, 0)
         class_l.addWidget(self.story_arc_cb, 1, 1)
-        class_l.addWidget(QLabel("Разделы"), 2, 0, Qt.AlignmentFlag.AlignTop)
-        class_l.addWidget(self.story_sections_list, 2, 1)
+        class_l.addWidget(QLabel("Ключевой объект"), 2, 0)
+        class_l.addWidget(self.story_key_object_cb, 2, 1)
+        class_l.addWidget(QLabel("Разделы"), 3, 0, Qt.AlignmentFlag.AlignTop)
+        class_l.addWidget(self.story_sections_list, 3, 1)
         d_l.addWidget(class_box)
 
         self.title_edit = QLineEdit()
@@ -353,7 +399,10 @@ class StoriesPage(QWidget):
         # signals
         self.season_cb.currentIndexChanged.connect(self._refresh_story_list)
         self.arc_cb.currentIndexChanged.connect(self._refresh_story_list)
+        self.key_objects_filter.itemChanged.connect(self._refresh_story_list)
         self.show_archived_cb.toggled.connect(self._refresh_story_list)
+        self.sections_in_seasons_cb.toggled.connect(self._on_stories_scope_filter_changed)
+        self.sections_outside_seasons_cb.toggled.connect(self._on_stories_scope_filter_changed)
         self.sections_filter.itemChanged.connect(self._refresh_story_list)
         self.sort_cb.currentIndexChanged.connect(self._on_sort_changed)
         self.search_edit.textChanged.connect(self._refresh_story_list)
@@ -375,6 +424,7 @@ class StoriesPage(QWidget):
             self._cancel_edit_mode()
         self._stories = self.storage.get_stories()
         self._rebuild_taxonomy_options()
+        self._apply_stories_filter_settings_from_storage()
         self._rebuild_status_options()
         self._rebuild_role_boxes()
         self._last_sort_mode = str(self.sort_cb.currentData() or "personal")
@@ -404,23 +454,38 @@ class StoriesPage(QWidget):
         seasons = [x for x in items if str(x.get("kind")) == "season"]
         arcs = [x for x in items if str(x.get("kind")) == "arc"]
         sections = [x for x in items if str(x.get("kind")) == "section"]
+        key_objects = [x for x in items if str(x.get("kind")) in _KEY_OBJECT_KINDS]
 
         def _sort(xs: list[dict[str, Any]]) -> list[dict[str, Any]]:
             return sorted(xs, key=lambda x: (0 if bool(x.get("locked")) else 1, str(x.get("name") or "").lower()))
 
+        def _sort_key_objects(xs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+            kind_rank = {k: i for i, k in enumerate(_KEY_OBJECT_KINDS)}
+            return sorted(
+                xs,
+                key=lambda x: (
+                    0 if bool(x.get("locked")) else 1,
+                    kind_rank.get(str(x.get("kind") or ""), 99),
+                    str(x.get("name") or "").lower(),
+                ),
+            )
+
         seasons = _sort(seasons)
         arcs = _sort(arcs)
         sections = _sort(sections)
+        key_objects = _sort_key_objects(key_objects)
 
         cur_season = str(self.season_cb.currentData() or "")
         cur_arc = str(self.arc_cb.currentData() or "")
         cur_story_season = str(self.story_season_cb.currentData() or "")
         cur_story_arc = str(self.story_arc_cb.currentData() or "")
+        cur_story_key_object = str(self.story_key_object_cb.currentData() or "")
 
         self.season_cb.blockSignals(True)
         self.arc_cb.blockSignals(True)
         self.story_season_cb.blockSignals(True)
         self.story_arc_cb.blockSignals(True)
+        self.story_key_object_cb.blockSignals(True)
         try:
             self.season_cb.clear()
             for s in seasons:
@@ -444,15 +509,45 @@ class StoriesPage(QWidget):
             for cb, cur in [(self.story_season_cb, cur_story_season), (self.story_arc_cb, cur_story_arc)]:
                 idx = cb.findData(cur)
                 cb.setCurrentIndex(idx if idx >= 0 else 0)
+
+            self.story_key_object_cb.clear()
+            self.story_key_object_cb.addItem("отсутствует", "")
+            for obj in key_objects:
+                self.story_key_object_cb.addItem(_key_object_display_name(obj), str(obj.get("id") or ""))
+            idx = self.story_key_object_cb.findData(cur_story_key_object)
+            self.story_key_object_cb.setCurrentIndex(idx if idx >= 0 else 0)
         finally:
             self.season_cb.blockSignals(False)
             self.arc_cb.blockSignals(False)
             self.story_season_cb.blockSignals(False)
             self.story_arc_cb.blockSignals(False)
+            self.story_key_object_cb.blockSignals(False)
+
+        self._all_key_objects = list(key_objects)
+        self.key_objects_filter.blockSignals(True)
+        try:
+            prev_checked: set[str] = set()
+            for i in range(self.key_objects_filter.count()):
+                it = self.key_objects_filter.item(i)
+                if it is not None and it.checkState() == Qt.CheckState.Checked:
+                    prev_checked.add(str(it.data(Qt.ItemDataRole.UserRole) or ""))
+            self.key_objects_filter.clear()
+            for obj in key_objects:
+                obj_id = str(obj.get("id") or "")
+                it = QListWidgetItem(_key_object_display_name(obj))
+                it.setFlags(it.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+                it.setCheckState(Qt.CheckState.Checked if obj_id in prev_checked else Qt.CheckState.Unchecked)
+                it.setData(Qt.ItemDataRole.UserRole, obj_id)
+                self.key_objects_filter.addItem(it)
+            self.key_objects_filter.setVisible(bool(key_objects))
+        finally:
+            self.key_objects_filter.blockSignals(False)
 
         # Sections:
         # - "Актуальные/Не актуальные" do not participate (archive is a separate flag).
+        # - "Вне сезонов" — только верхние чекбоксы «В сезонах» / «Вне сезонов», не список ниже.
         self._all_sections = [x for x in sections if str(x.get("id")) not in ("section_actual", "section_not_actual")]
+        filter_sections = [x for x in self._all_sections if not _is_outside_seasons_section(x)]
         self.sections_filter.blockSignals(True)
         try:
             prev_checked: set[str] = set()
@@ -461,7 +556,7 @@ class StoriesPage(QWidget):
                 if it is not None and it.checkState() == Qt.CheckState.Checked:
                     prev_checked.add(str(it.data(Qt.ItemDataRole.UserRole) or ""))
             self.sections_filter.clear()
-            for sec in self._all_sections:
+            for sec in filter_sections:
                 sec_id = str(sec.get("id") or "")
                 sec_name = str(sec.get("name") or "—")
                 it = QListWidgetItem(sec_name)
@@ -469,6 +564,7 @@ class StoriesPage(QWidget):
                 it.setCheckState(Qt.CheckState.Checked if sec_id in prev_checked else Qt.CheckState.Unchecked)
                 it.setData(Qt.ItemDataRole.UserRole, sec_id)
                 self.sections_filter.addItem(it)
+            self.sections_filter.setVisible(bool(filter_sections))
         finally:
             self.sections_filter.blockSignals(False)
 
@@ -502,15 +598,60 @@ class StoriesPage(QWidget):
             self._role_boxes[role_id] = {"box": gb, "search": se, "chips": chips}
             se.textChanged.connect(lambda _=None, rid=role_id: self._refresh_role_chips(rid))
 
+    def _apply_stories_filter_settings_from_storage(self) -> None:
+        ui = self.storage.get_ui_settings()
+        self.sections_in_seasons_cb.blockSignals(True)
+        self.sections_outside_seasons_cb.blockSignals(True)
+        try:
+            self.sections_in_seasons_cb.setChecked(bool(ui.get("stories_filter_in_seasons", True)))
+            self.sections_outside_seasons_cb.setChecked(bool(ui.get("stories_filter_outside_seasons", True)))
+        finally:
+            self.sections_in_seasons_cb.blockSignals(False)
+            self.sections_outside_seasons_cb.blockSignals(False)
+
+    def _on_stories_scope_filter_changed(self, *_args) -> None:
+        ui = self.storage.get_ui_settings()
+        ui["stories_filter_in_seasons"] = bool(self.sections_in_seasons_cb.isChecked())
+        ui["stories_filter_outside_seasons"] = bool(self.sections_outside_seasons_cb.isChecked())
+        self.storage.save_ui_settings(ui)
+        self._refresh_story_list()
+
+    def _outside_seasons_section_ids(self) -> set[str]:
+        out: set[str] = set()
+        for sec in self._all_sections:
+            if not _is_outside_seasons_section(sec):
+                continue
+            sid = str(sec.get("id") or "").strip()
+            if sid:
+                out.add(sid)
+        return out
+
+    @staticmethod
+    def _story_has_outside_seasons_mark(story: dict[str, Any], outside_ids: set[str]) -> bool:
+        if not outside_ids:
+            return False
+        sec_ids = story.get("section_ids")
+        if not isinstance(sec_ids, list):
+            return False
+        return any(str(x) in outside_ids for x in sec_ids)
+
     def _filtered_stories(self) -> list[dict[str, Any]]:
         season_id = str(self.season_cb.currentData() or "")
         arc_id = str(self.arc_cb.currentData() or "")
         show_archived = bool(self.show_archived_cb.isChecked())
+        show_in_seasons = bool(self.sections_in_seasons_cb.isChecked())
+        show_outside_seasons = bool(self.sections_outside_seasons_cb.isChecked())
+        outside_section_ids = self._outside_seasons_section_ids()
         selected_sections: set[str] = set()
         for i in range(self.sections_filter.count()):
             it = self.sections_filter.item(i)
             if it is not None and it.checkState() == Qt.CheckState.Checked:
                 selected_sections.add(str(it.data(Qt.ItemDataRole.UserRole) or ""))
+        selected_key_objects: set[str] = set()
+        for i in range(self.key_objects_filter.count()):
+            it = self.key_objects_filter.item(i)
+            if it is not None and it.checkState() == Qt.CheckState.Checked:
+                selected_key_objects.add(str(it.data(Qt.ItemDataRole.UserRole) or ""))
         q = _norm(self.search_edit.text())
         out: list[dict[str, Any]] = []
         for s in self._stories:
@@ -519,6 +660,16 @@ class StoriesPage(QWidget):
             if season_id and season_id != "season_all" and str(s.get("season_id") or "") != season_id:
                 continue
             if arc_id and arc_id != "arc_all" and str(s.get("arc_id") or "") != arc_id:
+                continue
+            if selected_key_objects:
+                story_key_object_id = str(s.get("key_object_id") or "").strip()
+                if story_key_object_id not in selected_key_objects:
+                    continue
+            marked_outside = self._story_has_outside_seasons_mark(s, outside_section_ids)
+            if marked_outside:
+                if not show_outside_seasons:
+                    continue
+            elif not show_in_seasons:
                 continue
             if selected_sections:
                 sec_ids = s.get("section_ids")
@@ -651,6 +802,16 @@ class StoriesPage(QWidget):
             st_name = str(st.get("name") or "—") if st else "—"
             st_color = str(st.get("color") or "#9E9E9E") if st else "#9E9E9E"
             assignments = s.get("assignments") if isinstance(s.get("assignments"), dict) else {}
+            key_object_name: str | None = None
+            key_object_color: str | None = None
+            key_object_id = str(s.get("key_object_id") or "").strip()
+            if key_object_id:
+                ko = next((x for x in self._all_key_objects if str(x.get("id") or "") == key_object_id), None)
+                if isinstance(ko, dict):
+                    ko_name = str(ko.get("name") or "").strip()
+                    if ko_name:
+                        key_object_name = ko_name
+                        key_object_color = str(ko.get("color") or STORY_KEY_OBJECT_DEFAULT_COLOR).strip() or STORY_KEY_OBJECT_DEFAULT_COLOR
 
             it = QListWidgetItem()
             it.setData(Qt.ItemDataRole.UserRole, sid)
@@ -658,6 +819,8 @@ class StoriesPage(QWidget):
                 title=title,
                 status_name=st_name,
                 status_color=st_color,
+                key_object_name=key_object_name,
+                key_object_color=key_object_color,
                 assignments=assignments,
                 people_name_by_id=people_name_by_id,
                 role_color_by_id=role_color_by_id,
@@ -797,6 +960,7 @@ class StoriesPage(QWidget):
         if not story:
             self.story_season_cb.setCurrentIndex(0)
             self.story_arc_cb.setCurrentIndex(0)
+            self.story_key_object_cb.setCurrentIndex(0)
             self.story_sections_list.clear()
             self.title_edit.setText("")
             self.url_edit.setText("")
@@ -819,6 +983,9 @@ class StoriesPage(QWidget):
         self.story_season_cb.setCurrentIndex(idx if idx >= 0 else 0)
         idx = self.story_arc_cb.findData(arc_id)
         self.story_arc_cb.setCurrentIndex(idx if idx >= 0 else 0)
+        key_object_id = str(story.get("key_object_id") or "").strip()
+        idx = self.story_key_object_cb.findData(key_object_id)
+        self.story_key_object_cb.setCurrentIndex(idx if idx >= 0 else 0)
         # sections multiselect
         self.story_sections_list.blockSignals(True)
         try:
@@ -857,6 +1024,7 @@ class StoriesPage(QWidget):
         # classification + details
         self.story_season_cb.setEnabled(enabled)
         self.story_arc_cb.setEnabled(enabled)
+        self.story_key_object_cb.setEnabled(enabled)
         self.story_sections_list.setEnabled(enabled)
         self.title_edit.setEnabled(enabled)
         self.url_edit.setEnabled(enabled)
@@ -942,6 +1110,7 @@ class StoriesPage(QWidget):
             "status_id": str(story.get("status_id") or ""),
             "season_id": str(story.get("season_id") or "season_all"),
             "arc_id": str(story.get("arc_id") or "arc_all"),
+            "key_object_id": str(story.get("key_object_id") or "").strip(),
             "section_ids": [str(x) for x in (story.get("section_ids") or []) if str(x)],
             "assignments": (story.get("assignments") if isinstance(story.get("assignments"), dict) else {}),
             "archived": bool(story.get("archived", False)),
@@ -973,6 +1142,7 @@ class StoriesPage(QWidget):
             "status_id": str(self.status_cb.currentData() or ""),
             "season_id": str(self.story_season_cb.currentData() or "season_all"),
             "arc_id": str(self.story_arc_cb.currentData() or "arc_all"),
+            "key_object_id": str(self.story_key_object_cb.currentData() or "").strip(),
             "section_ids": [x for x in sec_ids if x],
             "assignments": self._draft.get("assignments", {}),
             "archived": bool(self._draft.get("archived", False)),
@@ -1363,6 +1533,8 @@ class _StoryCard(QFrame):
         title: str,
         status_name: str,
         status_color: str,
+        key_object_name: str | None = None,
+        key_object_color: str | None = None,
         assignments: dict[str, Any],
         people_name_by_id: dict[str, str],
         role_color_by_id: dict[str, str],
@@ -1378,7 +1550,7 @@ class _StoryCard(QFrame):
         outer.setContentsMargins(12, 10, 12, 10)
         outer.setSpacing(10)
 
-        # Left: title (big, multi-line) + status (smaller)
+        # Left: title (big, multi-line) + optional key object + status (smaller)
         self._left = QWidget()
         self._left.setStyleSheet("background: transparent;")
         self._left_l = QVBoxLayout(self._left)
@@ -1386,6 +1558,24 @@ class _StoryCard(QFrame):
         self._left_l.setSpacing(4)
 
         self._title = _StoryCardTitleEdit(title, color_hex=str(status_color or "").strip() or None)
+        self._key_object: QLabel | None = None
+        ko_name = str(key_object_name or "").strip()
+        if ko_name:
+            ko_color = str(key_object_color or STORY_KEY_OBJECT_DEFAULT_COLOR).strip() or STORY_KEY_OBJECT_DEFAULT_COLOR
+            safe_name = _html_escape_text(ko_name)
+            self._key_object = QLabel(
+                f"<span style='color:#FFFFFF; font-weight:800;'>Ключевой объект:</span> "
+                f"<span style='color:{_html_escape_text(ko_color)}; font-weight:800;'>{safe_name}</span>"
+            )
+            self._key_object.setTextFormat(Qt.TextFormat.RichText)
+            self._key_object.setWordWrap(True)
+            self._key_object.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
+            self._key_object.setStyleSheet(
+                "background: transparent; border: none; font-size: 9pt; font-weight: 800; "
+                "padding: 0px; margin: 0px; margin-top: -3px;"
+            )
+            self._key_object.setContentsMargins(0, 0, 0, 0)
+
         self._status = QLabel(str(status_name or "—"))
         self._status.setStyleSheet(
             f"color:{str(status_color or '#9E9E9E')}; background: transparent; border: none; font-size: 9pt; font-weight:800; padding:0px; margin:0px;"
@@ -1395,6 +1585,8 @@ class _StoryCard(QFrame):
         self._status.setContentsMargins(0, 0, 0, 0)
 
         self._left_l.addWidget(self._title, 0)
+        if self._key_object is not None:
+            self._left_l.addWidget(self._key_object, 0)
         self._left_l.addWidget(self._status, 0)
         self._left_l.addStretch(1)
 
@@ -1432,21 +1624,30 @@ class _StoryCard(QFrame):
         self._left.setMinimumWidth(min(left_w, max(260, int(w * 0.70))))
         self._left.setMaximumWidth(left_w)
         self._title.setMaximumWidth(left_w)
+        if self._key_object is not None:
+            self._key_object.setMaximumWidth(left_w)
         self._status.setMaximumWidth(left_w)
         self._sync_height()
 
     def _sync_height(self) -> None:
         # Compute required height so content never gets clipped:
-        # - left side: title + status
+        # - left side: title + optional key object + status
         # - right side: assignees (wrapped)
         m = self.layout().contentsMargins() if self.layout() is not None else None
         top = int(m.top()) if m else 0
         bottom = int(m.bottom()) if m else 0
-        spacing = int(self.layout().spacing()) if self.layout() is not None else 0
+        left_spacing = int(self._left_l.spacing())
         title_h = int(self._title.height() or self._title.sizeHint().height() or 34)
         status_h = int(self._status.sizeHint().height() or 16)
 
-        left_h = title_h + spacing + status_h
+        left_h = title_h + left_spacing + status_h
+        if self._key_object is not None:
+            try:
+                kw = int(self._key_object.width() or 0)
+                ko_h = int(self._key_object.heightForWidth(kw)) if kw > 0 else int(self._key_object.sizeHint().height() or 0)
+            except Exception:
+                ko_h = int(self._key_object.sizeHint().height() or 16)
+            left_h = title_h + left_spacing + ko_h + left_spacing + status_h
 
         # QLabel height depends on its width when wordWrap is on; prefer heightForWidth.
         try:
@@ -1485,13 +1686,7 @@ class _StoryCard(QFrame):
                 name = str(people_name_by_id.get(pid) or "")
                 if not name:
                     continue
-                safe = (
-                    name.replace("&", "&amp;")
-                    .replace("<", "&lt;")
-                    .replace(">", "&gt;")
-                    .replace('"', "&quot;")
-                    .replace("'", "&#39;")
-                )
+                safe = _html_escape_text(name)
                 parts.append(f"<span style='color:{color}; font-weight:700'>{safe}</span>")
         # Wrap automatically; keep it compact.
         return ", ".join(parts)

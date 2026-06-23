@@ -24,6 +24,7 @@ from PySide6.QtGui import (
     QDrag,
     QPainterPath,
     QTextOption,
+    QShowEvent,
 )
 from PySide6.QtCore import QUrl
 from PySide6.QtWidgets import (
@@ -638,6 +639,11 @@ class BoardPage(QWidget):
         self._set_people_arrow_icon(0)
         if self._stories_enabled:
             self._sync_columns_visibility_ui()
+
+    def showEvent(self, event: QShowEvent) -> None:  # type: ignore[override]
+        super().showEvent(event)
+        # После скрытия окна (фон), админки или смены вкладки — сразу пересчитать время на карточках.
+        QTimer.singleShot(0, self._refresh_task_card_times)
 
     # --- Public API (kept similar to tkinter version) ---
     def refresh_after_theme_change(self) -> None:
@@ -1634,14 +1640,12 @@ class BoardPage(QWidget):
         return ("Постоянное", "font-weight:800; background: transparent;")
 
     def _refresh_task_card_times(self) -> None:
-        """Перерасчёт подписей времени на карточках без перезагрузки JSON из диска."""
-        if not self.isVisible():
-            return
-        if not bool(getattr(self, "_columns_visible", True)):
-            return
-        if hasattr(self, "main_stack") and self.main_stack.currentWidget() is not getattr(
-            self, "columns_inner", None
-        ):
+        """Перерасчёт подписей времени на карточках без перезагрузки JSON из диска.
+
+        Выполняется по таймеру пока живёт процесс, независимо от того, открыта ли сейчас
+        доска задач, админка или «Истории» — чтобы при возврате на доску подписи уже были актуальны.
+        """
+        if not getattr(self, "_columns", None):
             return
         theme = self.storage.get_ui_settings().get("theme", "dark")
         p = get_palette(theme)
